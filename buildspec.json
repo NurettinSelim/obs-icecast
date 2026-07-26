@@ -1,0 +1,11 @@
+{
+    "name": "obs-shoutcast",
+    "version": "1.0.0",
+    "description": "Icecast and SHOUTcast audio streaming output for OBS",
+    "author": "selim",
+    "platforms": {
+        "macos": {
+            "bundleId": "com.obsproject.obs-shoutcast"
+        }
+    }
+}

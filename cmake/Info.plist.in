@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>obs-shoutcast</string>
+	<key>CFBundleExecutable</key>
+	<string>obs-shoutcast</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.obsproject.obs-shoutcast</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>obs-shoutcast</string>
+	<key>CFBundlePackageType</key>
+	<string>BNDL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>${PLUGIN_VERSION}</string>
+	<key>CFBundleVersion</key>
+	<string>${PLUGIN_VERSION}</string>
+	<key>CFBundleSupportedPlatforms</key>
+	<array>
+		<string>MacOSX</string>
+	</array>
+	<key>LSMinimumSystemVersion</key>
+	<string>${CMAKE_OSX_DEPLOYMENT_TARGET}</string>
+</dict>
+</plist>
