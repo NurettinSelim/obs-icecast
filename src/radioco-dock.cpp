@@ -35,6 +35,7 @@
 #include <QCheckBox>
 #include <QPushButton>
 #include <QLabel>
+#include <QStringList>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QTimer>
@@ -94,6 +95,60 @@ static QIcon make_gear_icon(const QColor &color)
 
 /* ------------------------------------------------------------------ */
 
+/*
+ * What is actually on an OBS audio track, as libobs sees it. A source feeds
+ * mix N only if it is assigned to N, active, unmuted and not monitor-only —
+ * the same four tests obs-audio.c applies when it builds the mix.
+ */
+struct track_scan {
+	int track;         /* 0-based mixer index */
+	bool log;          /* also write per-source lines to the OBS log */
+	int on_air;
+	QStringList names; /* contributing source names, enumeration order */
+};
+
+static bool scan_track_source(void *param, obs_source_t *src)
+{
+	auto *scan = static_cast<track_scan *>(param);
+
+	/* obs_enum_sources also yields group sources; groups carry no audio
+	 * flag, so this test drops them. Do not "fix" it into a type check. */
+	if (!(obs_source_get_output_flags(src) & OBS_SOURCE_AUDIO))
+		return true;
+
+	const char *name = obs_source_get_name(src);
+
+	/*
+	 * Four reasons a source contributes nothing, checked in this order —
+	 * first hit wins. Track assignment comes first because that is what
+	 * the combo above this label controls.
+	 */
+	const char *reason = nullptr;
+	if (!(obs_source_get_audio_mixers(src) & (1u << scan->track)))
+		reason = "not on this track";
+	else if (!obs_source_active(src))
+		reason = "not in the active scene";
+	else if (obs_source_muted(src))
+		reason = "muted";
+	else if (obs_source_get_monitoring_type(src) ==
+		 OBS_MONITORING_TYPE_MONITOR_ONLY)
+		reason = "monitor only";
+
+	if (!reason) {
+		scan->on_air++;
+		scan->names << QString::fromUtf8(name ? name : "");
+	}
+
+	if (scan->log)
+		blog(LOG_INFO, "[obs-icecast] track %d: '%s' %s",
+		     scan->track + 1, name ? name : "(unnamed)",
+		     reason ? reason : "-> on air");
+
+	return true;
+}
+
+/* ------------------------------------------------------------------ */
+
 class RadioCoDock : public QWidget {
 	Q_OBJECT
 
@@ -117,6 +172,7 @@ private slots:
 	void onTick();
 	void onFieldChanged();
 	void onSettingsClicked();
+	void onTrackChanged();
 
 private:
 	void startOutput(bool asAutoStart);
@@ -126,6 +182,7 @@ private:
 	void loadSettings();
 	void saveSettings();
 	void refreshControls();
+	void updateTrackStatus();
 	obs_data_t *buildOutputSettings() const;
 
 	QComboBox *protocolBox = nullptr;
@@ -137,6 +194,9 @@ private:
 	QLineEdit *stationEdit = nullptr;
 	QPushButton *applyNameButton = nullptr;
 	QComboBox *bitrateBox = nullptr;
+	QComboBox *trackBox = nullptr;
+	QLabel *trackInfoLabel = nullptr;
+	QLabel *silentWarnLabel = nullptr;
 	QLineEdit *nowPlayingEdit = nullptr;
 	QPushButton *updateButton = nullptr;
 	QCheckBox *followObsBox = nullptr;
@@ -259,6 +319,18 @@ void RadioCoDock::buildSettingsDialog()
 	bitrateBox->setCurrentIndex(2); /* 128 */
 	form->addRow(QStringLiteral("Bitrate"), bitrateBox);
 
+	trackBox = new QComboBox(settingsDialog);
+	for (int i = 0; i < MAX_AUDIO_MIXES; i++)
+		trackBox->addItem(QStringLiteral("Track %1").arg(i + 1), i);
+	trackBox->setToolTip(QStringLiteral(
+		"Which OBS audio track feeds the radio stream. Assign sources "
+		"to tracks in Edit \u2192 Advanced Audio Properties."));
+	form->addRow(QStringLiteral("Audio track"), trackBox);
+
+	trackInfoLabel = new QLabel(settingsDialog);
+	trackInfoLabel->setWordWrap(true);
+	form->addRow(QString(), trackInfoLabel);
+
 	layout->addLayout(form);
 
 	/*
@@ -278,6 +350,7 @@ void RadioCoDock::buildSettingsDialog()
  */
 void RadioCoDock::onSettingsClicked()
 {
+	updateTrackStatus();
 	settingsDialog->show();
 	settingsDialog->raise();
 	settingsDialog->activateWindow();
@@ -312,6 +385,11 @@ RadioCoDock::RadioCoDock(QWidget *parent) : QWidget(parent)
 	followObsBox->setToolTip(QStringLiteral(
 		"Also connect this audio stream when OBS starts streaming video."));
 	root->addWidget(followObsBox);
+
+	silentWarnLabel = new QLabel(this);
+	silentWarnLabel->setWordWrap(true);
+	silentWarnLabel->setVisible(false);
+	root->addWidget(silentWarnLabel);
 
 	auto *bottom = new QHBoxLayout();
 	connectButton = new QPushButton(QStringLiteral("Connect"), this);
@@ -355,6 +433,11 @@ RadioCoDock::RadioCoDock(QWidget *parent) : QWidget(parent)
 		connect(e, &QLineEdit::textChanged, this,
 			&RadioCoDock::onFieldChanged);
 
+	/* Switching tracks reconnects, so it gets its own slot rather than
+	 * the shared onFieldChanged, which only saves. */
+	connect(trackBox, &QComboBox::currentIndexChanged, this,
+		&RadioCoDock::onTrackChanged);
+
 	loadSettings();
 
 	tickTimer = new QTimer(this);
@@ -362,6 +445,7 @@ RadioCoDock::RadioCoDock(QWidget *parent) : QWidget(parent)
 	connect(tickTimer, &QTimer::timeout, this, &RadioCoDock::onTick);
 	tickTimer->start();
 
+	updateTrackStatus();
 	refreshControls();
 }
 
@@ -409,11 +493,12 @@ void RadioCoDock::startOutput(bool asAutoStart)
 	}
 
 	const int bitrate = bitrateBox->currentData().toInt();
+	const size_t track = (size_t)trackBox->currentData().toInt();
 
 	obs_data_t *es = obs_data_create();
 	obs_data_set_int(es, "bitrate", bitrate);
 	encoder = obs_audio_encoder_create("icecast_mp3", "Radio.co MP3", es,
-					   0, nullptr);
+					   track, nullptr);
 	obs_data_release(es);
 
 	if (!encoder) {
@@ -422,6 +507,17 @@ void RadioCoDock::startOutput(bool asAutoStart)
 		return;
 	}
 	obs_encoder_set_audio(encoder, obs_get_audio());
+
+	blog(LOG_INFO, "[obs-icecast] streaming OBS audio track %zu",
+	     track + 1);
+
+	track_scan scan{(int)track, true, 0, {}};
+	obs_enum_sources(scan_track_source, &scan);
+	if (scan.on_air == 0)
+		blog(LOG_WARNING,
+		     "[obs-icecast] track %zu has no audio sources; the "
+		     "stream will be silent",
+		     track + 1);
 
 	obs_data_t *os = buildOutputSettings();
 	output = obs_output_create("icecast_output", "Radio.co Output", os,
@@ -557,6 +653,29 @@ void RadioCoDock::onFieldChanged()
 	refreshControls();
 }
 
+void RadioCoDock::onTrackChanged()
+{
+	if (loading)
+		return;
+
+	saveSettings();
+	updateTrackStatus();
+
+	/*
+	 * The mixer index is fixed when the encoder is created, so switching
+	 * tracks on air means a reconnect. Same mechanism as Apply Name: the
+	 * restart is fired from onOutputStopped, never synchronously here.
+	 */
+	if (output) {
+		pendingRestart = true;
+		stopOutput();
+		statusLabel->setText(
+			QStringLiteral("Switching audio track\u2026"));
+	}
+
+	refreshControls();
+}
+
 void RadioCoDock::onTick()
 {
 	if (shuttingDown)
@@ -572,6 +691,7 @@ void RadioCoDock::onTick()
 				.arg((secs / 60) % 60, 2, 10, QLatin1Char('0'))
 				.arg(secs % 60, 2, 10, QLatin1Char('0')));
 	}
+	updateTrackStatus();
 	refreshControls();
 }
 
@@ -639,6 +759,43 @@ void RadioCoDock::refreshControls()
 			? QStringLiteral("Reconnects the stream (brief dropout)")
 			: QStringLiteral(
 				  "The station name is sent when connecting"));
+
+	/*
+	 * Usable while live — switching reconnects — but locked during the
+	 * connect/disconnect window, where a second stopOutput() would race
+	 * a pending restart.
+	 */
+	trackBox->setEnabled(!active || obs_output_active(output));
+}
+
+/*
+ * Polled from onTick() at 1 Hz rather than driven by signals: track
+ * assignment, mute and monitoring are per-source signals with no global
+ * equivalent, and scene membership arrives separately again. One enumeration
+ * covers all of them with no per-source handler bookkeeping.
+ */
+void RadioCoDock::updateTrackStatus()
+{
+	track_scan scan{trackBox->currentData().toInt(), false, 0, {}};
+	obs_enum_sources(scan_track_source, &scan);
+
+	const bool silent = scan.on_air == 0;
+
+	if (silent)
+		silentWarnLabel->setText(
+			QStringLiteral("\u26a0 Track %1 has no audio \u2014 "
+				       "this stream is silent.")
+				.arg(scan.track + 1));
+	silentWarnLabel->setVisible(silent);
+
+	/* The detailed list is only worth building while it is on screen. */
+	if (settingsDialog->isVisible())
+		trackInfoLabel->setText(
+			silent ? QStringLiteral(
+					 "No audio sources on this track.")
+			       : QStringLiteral("On air: %1")
+					 .arg(scan.names.join(
+						 QStringLiteral(", "))));
 }
 
 void RadioCoDock::handleFrontendEvent(obs_frontend_event event)
@@ -697,6 +854,7 @@ void RadioCoDock::loadSettings()
 	obs_data_set_default_string(s, "password", "");
 	obs_data_set_default_string(s, "station_name", "OBS Stream");
 	obs_data_set_default_int(s, "bitrate", 128);
+	obs_data_set_default_int(s, "mixer_index", 0);
 	obs_data_set_default_string(s, "song", "");
 	obs_data_set_default_bool(s, "follow_obs", false);
 
@@ -718,6 +876,13 @@ void RadioCoDock::loadSettings()
 	const int bitrate = (int)obs_data_get_int(s, "bitrate");
 	const int bitrateIdx = bitrateBox->findData(bitrate);
 	bitrateBox->setCurrentIndex(bitrateIdx >= 0 ? bitrateIdx : 2);
+
+	/* Clamp: a settings file from another machine or a future version
+	 * must not hand libobs an out-of-range mixer index. */
+	int track = (int)obs_data_get_int(s, "mixer_index");
+	if (track < 0 || track >= MAX_AUDIO_MIXES)
+		track = 0;
+	trackBox->setCurrentIndex(track);
 
 	nowPlayingEdit->setText(
 		QString::fromUtf8(obs_data_get_string(s, "song")));
@@ -754,6 +919,7 @@ void RadioCoDock::saveSettings()
 	obs_data_set_string(s, "station_name",
 			    stationEdit->text().toUtf8().constData());
 	obs_data_set_int(s, "bitrate", bitrateBox->currentData().toInt());
+	obs_data_set_int(s, "mixer_index", trackBox->currentData().toInt());
 	obs_data_set_string(s, "song",
 			    nowPlayingEdit->text().toUtf8().constData());
 	obs_data_set_bool(s, "follow_obs", followObsBox->isChecked());

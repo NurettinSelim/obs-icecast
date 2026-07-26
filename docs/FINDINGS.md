@@ -313,7 +313,7 @@ size proves only that the kernel accepted them.
 
 ---
 
-## 4. Three bugs that only a real run exposed
+## 4. Four bugs that only a real run exposed
 
 ### 4.1 No audio on the wire
 
@@ -436,10 +436,74 @@ offset deliberately does **not** apply to `icy_update_metadata()`, because
 `/admin.cgi` lives on the base port — so the user enters one port, `4192`, and
 both paths land where they should.
 
-**Lesson for all three bugs.** None is visible from the UI, the log's happy
+### 4.4 The stream carried only whatever sat on Track 1
+
+**Symptom.** On air, listeners heard the microphone and nothing else — no
+desktop audio. Byte rate, frame count and every log line were healthy; the
+stream was simply missing a source.
+
+**Cause.** `startOutput()` passed a literal `0` as the `mixer_idx` argument of
+`obs_audio_encoder_create()`, so the plugin always encoded OBS audio track 1,
+with no UI for it and nothing in the log to say so. On the diagnosing machine
+the mic was the only source assigned to track 1; desktop audio was on track 2.
+Nothing was broken — the plugin was faithfully streaming an almost-empty mix.
+
+**Fix.** An **Audio track** selector (1–6) in the settings dialog, persisted as
+the 0-based key `mixer_index`, clamped to `[0, MAX_AUDIO_MIXES)` on load.
+Because `mixer_idx` is taken by value at encoder creation, changing it while
+live reconnects through the existing `pendingRestart` + `stopOutput()` path.
+
+**The diagnostic matters more than the selector.** Knowing *which* track to
+pick requires knowing what is on each one, and a source's `mixers` bitmask
+alone does not answer that: libobs also requires the source to be active,
+unmuted and not monitor-only (`obs-audio.c:596`, `:606`;
+`obs-source.c:1650`). The dock therefore enumerates sources once a second and
+applies all four tests, showing the contributing names in the dialog and a
+standing warning when the selected track is empty. Polling rather than signal
+wiring: `audio_mixers`, `mute` and `audio_monitoring` are per-source signals
+with no global equivalent, while lifetime and scene membership arrive on the
+core handler, so one enumeration replaces per-source handler bookkeeping
+across libobs threads.
+
+**Measured**, streaming into a local sink at 128 kbps with a 440 Hz tone
+playing into the desktop-audio source:
+
+```
+track 2 (macOS Screen Capture)  439,296 B / 27.46 s   mean_volume -12.1 dB
+track 4 (nothing assigned)      366,720 B / 22.92 s   mean_volume -91.0 dB
+```
+
+Both files are the full size for their duration (~16,000 B/s) and both start
+`fffb9464`, so the encoder path is identical — only the mix content differs.
+`-91.0 dB` is digital silence. A *small* file would have meant a broken
+encoder; a full-size silent one is exactly the failure this bug produced.
+
+The per-source breakdown written at connect time, matching the machine's real
+routing:
+
+```
+[obs-icecast] streaming OBS audio track 4
+[obs-icecast] track 4: 'Mic/Aux' not on this track
+[obs-icecast] track 4: 'macOS Screen Capture' not on this track
+[obs-icecast] track 4: 'Video Capture Device' not on this track
+[obs-icecast] track 4: 'macOS Screen Capture 2' not in the active scene
+[obs-icecast] track 4 has no audio sources; the stream will be silent
+```
+
+`macOS Screen Capture 2` names all six tracks in its mask and still reaches
+none of them, because it lives in a scene that is not on program — the
+measurement that justifies the `obs_source_active` test.
+
+**Why it hid.** Every layer below the mix was correct, and the one number that
+would have exposed it — how loud the received audio is — is not something a
+byte counter reports. §4.1 taught that a handshake proves nothing; this one
+adds that a *byte count* proves nothing either. Decode the audio.
+
+**Lesson for all four bugs.** None is visible from the UI, the log's happy
 path, or a code read. One needed byte counting at the far end of the socket,
 one a diff against a known-good shutdown log, one a port-by-port handshake
-probe. Verify the ends, not the middle.
+probe, one a volume measurement of the decoded result. Verify the ends, not
+the middle.
 
 ---
 
@@ -559,12 +623,18 @@ Run on 2026-07-26 against OBS Studio 32.2.1 on macOS (Apple Silicon).
 | 12 | Endpoint comparison | **pass** — `.dj.radio.co` accepted 135,168 B (= `SO_SNDBUF`) and stalled even at a 75 s timeout; `maple.radio.co:4193` took 640,557 B over 40 s with no stall |
 | 13 | **Live on air through the plugin** | **pass** — `source.type` `automated` → **`live` in 7 s**, held ~45 s, `[icy] connected to maple.radio.co:4192 (source port 4193, 128 kbps)`, **zero** `send failed`, clean return to `automated` |
 | 14 | Metadata on air | **pass** — `OBS Plugin Live Test` appeared as `current_track.title` while live |
+| 15 | Selected track determines the audio | **pass** — track 2 (tone into desktop capture) `mean_volume -12.1 dB`, track 4 (unassigned) `-91.0 dB`; both full size for their duration, both starting `fffb9464` |
+| 16 | Track scan matches real routing | **pass** — connect-time log named every source with the reason it was in or out; `macOS Screen Capture 2`, masked for all six tracks but parked off program, logged `not in the active scene` on each |
+| 17 | Diagnostic follows OBS live | **pass** — muting the source, then hiding it, each flipped the dock to `⚠ Track 2 has no audio` within ~1 s with the settings dialog closed; both reversed on undo, and `Idle` in the status label was never overwritten |
+| 18 | Track switch on a live feed | **pass** — switching track 4 → 2 while live reconnected: sink logged `conn1 closed bytes=522240` then `accepted conn2`, dock timer reset and returned to `● Live` |
+| 19 | Empty track does not block connect | **pass** — connecting on track 4 logged `track 4 has no audio sources; the stream will be silent` and streamed 366,720 B of silence rather than refusing |
+| 20 | **Quitting OBS while live** | **pass** — `OBS → Quit` with a feed running ended with the full profiler summary and `Number of memory leaks: 0` |
 
 Verified live against the production station through the finished plugin:
-connecting, going on air, and metadata (checks 13-14). Still to do on the
-streaming Mac, because they need that machine or a second destination: the
-station-name reconnect, Kick and Radio.co at once, the follow-OBS checkbox end
-to end, and quitting while live.
+connecting, going on air, and metadata (checks 13-14). Checks 15-20 were run
+against the local sink on 2026-07-26. Still to do on the streaming Mac,
+because they need that machine or a second destination: the station-name
+reconnect, Kick and Radio.co at once, and the follow-OBS checkbox end to end.
 
 ### How to re-run the local end-to-end test
 
@@ -577,6 +647,15 @@ The harness is not shipped in the repo. To reproduce:
    **Connect**.
 3. Expect roughly `bitrate_kbps × seconds / 8` KB and a first frame header of
    `fffb…` for 128 kbps 48 kHz.
+4. For track-routing work, decode the result:
+   `ffmpeg -i cap.mp3 -af volumedetect -f null -`. Around `-91 dB` is digital
+   silence; audible content sits well above `-50 dB`.
 
 Counting frames — not merely observing that a connection succeeded — is the
-part that catches the §4 class of bug.
+part that catches the §4.1 class of bug; measuring volume is what catches
+§4.4, where the byte count is perfect and the audio is empty.
+
+**Write `settings.json` only while OBS is closed.** Its exit handler saves the
+dock's in-memory state, so an edit made while OBS is running is discarded at
+quit and the next launch comes up on the previous config — pointed at
+production.

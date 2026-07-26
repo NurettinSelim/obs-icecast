@@ -70,6 +70,7 @@ right of the Connect row, which opens **Radio.co Settings**:
 | Password | The broadcast password from your dashboard. SHOUTcast v1 wants the short token; Icecast wants the long base64 blob |
 | Station name | Sent as `ice-name` when connecting |
 | Bitrate | 64 – 320 kbps |
+| Audio track | Which OBS audio track (1–6) feeds the stream. Default Track 1. See the **Audio track** notes below |
 
 That dialog has no OK: every field is saved the moment you change it, and
 **Close** only puts the window away.
@@ -90,6 +91,44 @@ connection. Editing it while connected enables **Apply Name**, which reconnects
 to apply it — a brief dropout. When not connected it is simply picked up on the
 next Connect. If a dropout is unacceptable, change the name in the Radio.co
 dashboard instead; that is what listeners actually see.
+
+**Audio track** decides what listeners actually hear. OBS mixes each source
+into up to six numbered tracks, set per source under *Edit → Advanced Audio
+Properties*; this plugin encodes exactly one of them. If your mic sits on
+Track 1 and your desktop audio on Track 2, then Track 1 streams the mic alone
+— which is the usual cause of "the stream is missing the computer sound". Fix
+it either by pointing this selector at the track you want or, to carry both,
+by ticking the same track for both sources in Advanced Audio Properties.
+
+The settings dialog lists what is on the selected track right under the combo
+(`On air: Mic/Aux, macOS Screen Capture`), and the dock shows a standing
+warning whenever the selected track carries nothing:
+
+```
+⚠ Track 4 has no audio — this stream is silent.
+```
+
+Both refresh about once a second, so they follow changes you make in OBS —
+re-assigning a track, muting a source, hiding it, or switching scenes — with
+no need to reopen anything. A source is counted only when it is assigned to
+the track, in the active scene, unmuted, and not set to *Monitor Only*; those
+are the same four conditions libobs applies when it builds the mix. The list
+reports routing, not signal, so a source that is connected but silent still
+shows as on air.
+
+Changing the track while live reconnects — the mixer index is fixed when the
+encoder is created — so it costs the same brief dropout as **Apply Name**. The
+choice is stored per machine, so a second computer starts on Track 1.
+
+Connecting on an empty track is allowed, not blocked: sources can be added
+after you go live. The OBS log records the full breakdown at connect time:
+
+```
+[obs-icecast] streaming OBS audio track 2
+[obs-icecast] track 2: 'Mic/Aux' not on this track
+[obs-icecast] track 2: 'macOS Screen Capture' -> on air
+[obs-icecast] track 2: 'macOS Screen Capture 2' not in the active scene
+```
 
 **Connect with OBS "Start Streaming"** (off by default) ties the audio feed to
 OBS's own stream button, so one click goes live on both the video platform and
