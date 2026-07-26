@@ -1,4 +1,4 @@
-# obs-shoutcast
+# obs-icecast
 
 An OBS Studio plugin that streams **audio-only MP3** to Icecast / Liquidsoap
 and SHOUTcast v1 servers, with a native **Radio.co** dock for connecting,
@@ -35,11 +35,11 @@ the copies already inside `OBS.app`, which is why the OBS major matters.
 ```bash
 mkdir -p ~/Library/Application\ Support/obs-studio/plugins
 
-unzip -o ~/Downloads/obs-shoutcast-1.0.0-arm64.zip \
+unzip -o ~/Downloads/obs-icecast-1.0.0-arm64.zip \
       -d ~/Library/Application\ Support/obs-studio/plugins/
 
 xattr -dr com.apple.quarantine \
-      ~/Library/Application\ Support/obs-studio/plugins/obs-shoutcast.plugin
+      ~/Library/Application\ Support/obs-studio/plugins/obs-icecast.plugin
 ```
 
 Then relaunch OBS.
@@ -116,15 +116,15 @@ it is not an audio-only one.
 ```bash
 brew install qt simde
 
-cd obs-shoutcast
+cd obs-icecast
 cmake -S . -B build
 cmake --build build
 
-codesign --force --sign - --identifier io.github.nurettinselim.obs-shoutcast \
-         --timestamp=none build/obs-shoutcast.plugin
+codesign --force --sign - --identifier io.github.nurettinselim.obs-icecast \
+         --timestamp=none build/obs-icecast.plugin
 
-ditto -c -k --keepParent build/obs-shoutcast.plugin \
-      obs-shoutcast-1.0.0-arm64.zip
+ditto -c -k --keepParent build/obs-icecast.plugin \
+      obs-icecast-1.0.0-arm64.zip
 ```
 
 `simde` is needed because `libobs`'s SSE-intrinsics header pulls in
@@ -169,7 +169,7 @@ curl -s https://public.radio.co/stations/<station-id>/status \
 ## Configuration file
 
 ```
-~/Library/Application Support/obs-studio/plugin_config/obs-shoutcast/settings.json
+~/Library/Application Support/obs-studio/plugin_config/obs-icecast/settings.json
 ```
 
 Dock settings are written here on every change. **The password is stored in

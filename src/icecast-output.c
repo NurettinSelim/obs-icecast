@@ -1,5 +1,5 @@
 /*
- * obs-shoutcast - audio-only MP3 streaming output for OBS Studio
+ * obs-icecast - audio-only MP3 streaming output for OBS Studio
  * Copyright (C) 2026 Nurettin Selim
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -18,14 +18,14 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include "shoutcast-output.h"
+#include "icecast-output.h"
 #include "icy-protocol.h"
 
 #include <pthread.h>
 #include <util/threading.h>
 #include <media-io/audio-io.h>
 
-struct shoutcast_output {
+struct icecast_output {
 	obs_output_t *output;
 	int sock_fd;
 	pthread_mutex_t write_mutex;
@@ -37,7 +37,7 @@ struct shoutcast_output {
 
 /*
  * A metadata update runs on a detached thread and must never dereference
- * struct shoutcast_output — an update racing shutdown would be a
+ * struct icecast_output — an update racing shutdown would be a
  * use-after-free — so everything it needs is copied at dispatch time.
  */
 struct metadata_job {
@@ -52,17 +52,17 @@ struct metadata_job {
 
 /* ------------------------------------------------------------------ */
 
-static const char *shoutcast_getname(void *unused)
+static const char *icecast_getname(void *unused)
 {
 	UNUSED_PARAMETER(unused);
 	return obs_module_text("SHOUTcastOutput");
 }
 
-static void *shoutcast_create(obs_data_t *settings, obs_output_t *output)
+static void *icecast_create(obs_data_t *settings, obs_output_t *output)
 {
 	UNUSED_PARAMETER(settings);
 
-	struct shoutcast_output *out = bzalloc(sizeof(*out));
+	struct icecast_output *out = bzalloc(sizeof(*out));
 	out->output = output;
 	out->sock_fd = -1;
 	pthread_mutex_init(&out->write_mutex, NULL);
@@ -71,9 +71,9 @@ static void *shoutcast_create(obs_data_t *settings, obs_output_t *output)
 	return out;
 }
 
-static void shoutcast_destroy(void *data)
+static void icecast_destroy(void *data)
 {
-	struct shoutcast_output *out = data;
+	struct icecast_output *out = data;
 
 	if (out->sock_fd >= 0)
 		icy_disconnect(out->sock_fd);
@@ -88,7 +88,7 @@ static void shoutcast_destroy(void *data)
 
 static void *connect_thread(void *data)
 {
-	struct shoutcast_output *out = data;
+	struct icecast_output *out = data;
 	obs_data_t *settings = obs_output_get_settings(out->output);
 
 	audio_t *audio = obs_get_audio();
@@ -128,7 +128,7 @@ static void *connect_thread(void *data)
 	}
 
 	if (fd < 0) {
-		blog(LOG_ERROR, "[shoutcast] connection failed: %s", error);
+		blog(LOG_ERROR, "[icecast] connection failed: %s", error);
 		obs_output_signal_stop(out->output, OBS_OUTPUT_CONNECT_FAILED);
 		out->connecting = false;
 		return NULL;
@@ -141,13 +141,13 @@ static void *connect_thread(void *data)
 	out->connecting = false;
 	obs_output_begin_data_capture(out->output, 0);
 
-	blog(LOG_INFO, "[shoutcast] streaming started");
+	blog(LOG_INFO, "[icecast] streaming started");
 	return NULL;
 }
 
-static bool shoutcast_start(void *data)
+static bool icecast_start(void *data)
 {
-	struct shoutcast_output *out = data;
+	struct icecast_output *out = data;
 
 	/*
 	 * Both calls are mandatory for an encoded output. Without
@@ -158,7 +158,7 @@ static bool shoutcast_start(void *data)
 	if (!obs_output_can_begin_data_capture(out->output, 0))
 		return false;
 	if (!obs_output_initialize_encoders(out->output, 0)) {
-		blog(LOG_ERROR, "[shoutcast] failed to initialize encoders");
+		blog(LOG_ERROR, "[icecast] failed to initialize encoders");
 		return false;
 	}
 
@@ -168,7 +168,7 @@ static bool shoutcast_start(void *data)
 	int ret = pthread_create(&out->connect_thread, NULL, connect_thread,
 				 out);
 	if (ret != 0) {
-		blog(LOG_ERROR, "[shoutcast] failed to create connect thread");
+		blog(LOG_ERROR, "[icecast] failed to create connect thread");
 		out->connecting = false;
 		return false;
 	}
@@ -176,9 +176,9 @@ static bool shoutcast_start(void *data)
 	return true;
 }
 
-static void shoutcast_stop(void *data, uint64_t ts)
+static void icecast_stop(void *data, uint64_t ts)
 {
-	struct shoutcast_output *out = data;
+	struct icecast_output *out = data;
 	UNUSED_PARAMETER(ts);
 
 	os_event_signal(out->stop_event);
@@ -196,15 +196,15 @@ static void shoutcast_stop(void *data, uint64_t ts)
 	}
 	pthread_mutex_unlock(&out->write_mutex);
 
-	blog(LOG_INFO, "[shoutcast] streaming stopped");
+	blog(LOG_INFO, "[icecast] streaming stopped");
 }
 
 /* ------------------------------------------------------------------ */
 
-static void shoutcast_encoded_packet(void *data,
+static void icecast_encoded_packet(void *data,
 				     struct encoder_packet *packet)
 {
-	struct shoutcast_output *out = data;
+	struct icecast_output *out = data;
 
 	if (packet->type != OBS_ENCODER_AUDIO)
 		return;
@@ -266,9 +266,9 @@ static void *metadata_thread(void *arg)
  * Called by libobs whenever the output's settings change. The dock uses it
  * to push a now-playing line without interrupting audio.
  */
-static void shoutcast_update(void *data, obs_data_t *settings)
+static void icecast_update(void *data, obs_data_t *settings)
 {
-	struct shoutcast_output *out = data;
+	struct icecast_output *out = data;
 
 	const char *song = obs_data_get_string(settings, "song");
 	if (!song || !*song)
@@ -310,7 +310,7 @@ static void shoutcast_update(void *data, obs_data_t *settings)
 
 /* ------------------------------------------------------------------ */
 
-static void shoutcast_defaults(obs_data_t *settings)
+static void icecast_defaults(obs_data_t *settings)
 {
 	obs_data_set_default_int(settings, "port", 8000);
 	obs_data_set_default_int(settings, "protocol", 0); /* PROTOCOL_ICECAST */
@@ -323,7 +323,7 @@ static void shoutcast_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "bitrate", 128);
 }
 
-static obs_properties_t *shoutcast_properties(void *unused)
+static obs_properties_t *icecast_properties(void *unused)
 {
 	UNUSED_PARAMETER(unused);
 	obs_properties_t *props = obs_properties_create();
@@ -360,17 +360,17 @@ static obs_properties_t *shoutcast_properties(void *unused)
 
 /* ------------------------------------------------------------------ */
 
-struct obs_output_info shoutcast_output_info = {
-	.id = "shoutcast_output",
+struct obs_output_info icecast_output_info = {
+	.id = "icecast_output",
 	.flags = OBS_OUTPUT_AUDIO | OBS_OUTPUT_ENCODED,
 	.encoded_audio_codecs = "mp3",
-	.get_name = shoutcast_getname,
-	.create = shoutcast_create,
-	.destroy = shoutcast_destroy,
-	.start = shoutcast_start,
-	.stop = shoutcast_stop,
-	.encoded_packet = shoutcast_encoded_packet,
-	.get_defaults = shoutcast_defaults,
-	.get_properties = shoutcast_properties,
-	.update = shoutcast_update,
+	.get_name = icecast_getname,
+	.create = icecast_create,
+	.destroy = icecast_destroy,
+	.start = icecast_start,
+	.stop = icecast_stop,
+	.encoded_packet = icecast_encoded_packet,
+	.get_defaults = icecast_defaults,
+	.get_properties = icecast_properties,
+	.update = icecast_update,
 };

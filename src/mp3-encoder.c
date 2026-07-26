@@ -1,5 +1,5 @@
 /*
- * obs-shoutcast - audio-only MP3 streaming output for OBS Studio
+ * obs-icecast - audio-only MP3 streaming output for OBS Studio
  * Copyright (C) 2026 Nurettin Selim
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -52,7 +52,7 @@ static void *mp3_create(obs_data_t *settings, obs_encoder_t *encoder)
 	enc->codec = avcodec_find_encoder_by_name("libmp3lame");
 	if (!enc->codec) {
 		blog(LOG_ERROR,
-		     "[shoutcast_mp3] libmp3lame encoder not found in FFmpeg");
+		     "[icecast_mp3] libmp3lame encoder not found in FFmpeg");
 		bfree(enc);
 		return NULL;
 	}
@@ -60,7 +60,7 @@ static void *mp3_create(obs_data_t *settings, obs_encoder_t *encoder)
 	enc->ctx = avcodec_alloc_context3(enc->codec);
 	if (!enc->ctx) {
 		blog(LOG_ERROR,
-		     "[shoutcast_mp3] failed to allocate codec context");
+		     "[icecast_mp3] failed to allocate codec context");
 		bfree(enc);
 		return NULL;
 	}
@@ -90,7 +90,7 @@ static void *mp3_create(obs_data_t *settings, obs_encoder_t *encoder)
 	if (ret < 0) {
 		char errbuf[256];
 		av_strerror(ret, errbuf, sizeof(errbuf));
-		blog(LOG_ERROR, "[shoutcast_mp3] avcodec_open2 failed: %s",
+		blog(LOG_ERROR, "[icecast_mp3] avcodec_open2 failed: %s",
 		     errbuf);
 		avcodec_free_context(&enc->ctx);
 		bfree(enc);
@@ -116,7 +116,7 @@ static void *mp3_create(obs_data_t *settings, obs_encoder_t *encoder)
 	enc->total_samples = 0;
 
 	blog(LOG_INFO,
-	     "[shoutcast_mp3] encoder created: %d kbps, %d Hz, %d ch",
+	     "[icecast_mp3] encoder created: %d kbps, %d Hz, %d ch",
 	     bitrate, enc->ctx->sample_rate, enc->channels);
 
 	return enc;
@@ -156,7 +156,7 @@ static bool mp3_encode(void *data, struct encoder_frame *frame,
 	/* Send frame to encoder */
 	int ret = avcodec_send_frame(enc->ctx, enc->frame);
 	if (ret < 0 && ret != AVERROR(EAGAIN)) {
-		blog(LOG_ERROR, "[shoutcast_mp3] avcodec_send_frame: %d", ret);
+		blog(LOG_ERROR, "[icecast_mp3] avcodec_send_frame: %d", ret);
 		return false;
 	}
 
@@ -165,7 +165,7 @@ static bool mp3_encode(void *data, struct encoder_frame *frame,
 	if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
 		return true; /* Need more input */
 	} else if (ret < 0) {
-		blog(LOG_ERROR, "[shoutcast_mp3] avcodec_receive_packet: %d",
+		blog(LOG_ERROR, "[icecast_mp3] avcodec_receive_packet: %d",
 		     ret);
 		return false;
 	}
@@ -242,8 +242,8 @@ static size_t mp3_get_frame_size(void *data)
 
 /* ------------------------------------------------------------------ */
 
-struct obs_encoder_info shoutcast_mp3_encoder = {
-	.id = "shoutcast_mp3",
+struct obs_encoder_info icecast_mp3_encoder = {
+	.id = "icecast_mp3",
 	.type = OBS_ENCODER_AUDIO,
 	.codec = "mp3",
 	.get_name = mp3_getname,

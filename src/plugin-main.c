@@ -1,5 +1,5 @@
 /*
- * obs-shoutcast - audio-only MP3 streaming output for OBS Studio
+ * obs-icecast - audio-only MP3 streaming output for OBS Studio
  * Copyright (C) 2026 Nurettin Selim
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -21,17 +21,17 @@
 #include <obs-module.h>
 
 #include "mp3-encoder.h"
-#include "shoutcast-output.h"
+#include "icecast-output.h"
 #include "radioco-dock.h"
 
 OBS_DECLARE_MODULE()
-OBS_MODULE_USE_DEFAULT_LOCALE("obs-shoutcast", "en-US")
+OBS_MODULE_USE_DEFAULT_LOCALE("obs-icecast", "en-US")
 
 bool obs_module_load(void)
 {
-	obs_register_encoder(&shoutcast_mp3_encoder);
-	obs_register_output(&shoutcast_output_info);
-	blog(LOG_INFO, "[obs-shoutcast] plugin loaded (version %s)",
+	obs_register_encoder(&icecast_mp3_encoder);
+	obs_register_output(&icecast_output_info);
+	blog(LOG_INFO, "[obs-icecast] plugin loaded (version %s)",
 	     PLUGIN_VERSION);
 	return true;
 }
@@ -50,5 +50,5 @@ void obs_module_post_load(void)
 void obs_module_unload(void)
 {
 	radioco_dock_free();
-	blog(LOG_INFO, "[obs-shoutcast] plugin unloaded");
+	blog(LOG_INFO, "[obs-icecast] plugin unloaded");
 }

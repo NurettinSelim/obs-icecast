@@ -1,5 +1,5 @@
 /*
- * obs-shoutcast - audio-only MP3 streaming output for OBS Studio
+ * obs-icecast - audio-only MP3 streaming output for OBS Studio
  * Copyright (C) 2026 Nurettin Selim
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -319,7 +319,7 @@ static int icy_handshake_icecast(int sock_fd, const struct icy_params *params,
 			 "SOURCE %s HTTP/1.0\r\n"
 			 "Authorization: Basic %s\r\n"
 			 "Host: %s:%d\r\n"
-			 "User-Agent: obs-shoutcast/%s\r\n"
+			 "User-Agent: obs-icecast/%s\r\n"
 			 "Content-Type: audio/mpeg\r\n"
 			 "ice-name: %s\r\n"
 			 "ice-genre: %s\r\n",
@@ -487,7 +487,7 @@ int icy_update_metadata(const struct icy_params *params, const char *song,
 			"GET /admin/metadata?mode=updinfo&mount=%s&song=%s HTTP/1.0\r\n"
 			"Authorization: Basic %s\r\n"
 			"Host: %s:%d\r\n"
-			"User-Agent: obs-shoutcast/%s\r\n"
+			"User-Agent: obs-icecast/%s\r\n"
 			"\r\n",
 			mount, song_enc, auth_b64, params->server,
 			params->port, PLUGIN_VERSION);

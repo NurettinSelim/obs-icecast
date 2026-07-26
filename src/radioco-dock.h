@@ -1,5 +1,5 @@
 /*
- * obs-shoutcast - audio-only MP3 streaming output for OBS Studio
+ * obs-icecast - audio-only MP3 streaming output for OBS Studio
  * Copyright (C) 2026 Nurettin Selim
  *
  * SPDX-License-Identifier: GPL-2.0-or-later

@@ -14,7 +14,7 @@ cmake_minimum_required(VERSION 3.16...3.26)
 set(CMAKE_OSX_DEPLOYMENT_TARGET "13.0" CACHE STRING "Minimum macOS version")
 set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "Build architectures")
 
-project(obs-shoutcast VERSION 1.0.0 LANGUAGES C CXX)
+project(obs-icecast VERSION 1.0.0 LANGUAGES C CXX)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -140,19 +140,19 @@ if(APPLE)
 endif()
 
 # ── Plugin target ────────────────────────────────────────────────────
-add_library(obs-shoutcast MODULE
+add_library(obs-icecast MODULE
     src/plugin-main.c
     src/mp3-encoder.c
-    src/shoutcast-output.c
+    src/icecast-output.c
     src/icy-protocol.c
     src/radioco-dock.cpp
 )
 
-target_include_directories(obs-shoutcast PRIVATE src)
+target_include_directories(obs-icecast PRIVATE src)
 
 # Link FFmpeg headers only (compile-time), not the libraries.
 # At runtime the plugin uses OBS's bundled FFmpeg via @rpath.
-target_include_directories(obs-shoutcast SYSTEM PRIVATE
+target_include_directories(obs-icecast SYSTEM PRIVATE
     ${LIBAVCODEC_INCLUDE_DIRS}
     ${LIBAVUTIL_INCLUDE_DIRS}
 )
@@ -170,7 +170,7 @@ if(APPLE)
 
     # Qt headers from Homebrew; the libraries linked are OBS's own.
     # simde satisfies libobs's <simde/x86/sse2.h> include on arm64.
-    target_include_directories(obs-shoutcast SYSTEM PRIVATE
+    target_include_directories(obs-icecast SYSTEM PRIVATE
         ${Qt6Core_INCLUDE_DIRS}
         ${Qt6Gui_INCLUDE_DIRS}
         ${Qt6Widgets_INCLUDE_DIRS}
@@ -187,10 +187,10 @@ if(APPLE)
         list(GET _fe_hdr 0 _fe_hdr0)
         get_filename_component(_fe_dir "${_fe_hdr0}" DIRECTORY)
         message(STATUS "obs-frontend-api.h: ${_fe_hdr0}")
-        target_include_directories(obs-shoutcast SYSTEM PRIVATE "${_fe_dir}")
+        target_include_directories(obs-icecast SYSTEM PRIVATE "${_fe_dir}")
     endif()
 
-    target_link_libraries(obs-shoutcast PRIVATE
+    target_link_libraries(obs-icecast PRIVATE
         OBS::libobs
         obs-avcodec
         obs-avutil
@@ -202,31 +202,31 @@ if(APPLE)
 
     # Replace the absolute /Applications/OBS.app/... rpath CMake would
     # otherwise bake in, so the bundle works wherever OBS is installed.
-    set_target_properties(obs-shoutcast PROPERTIES
+    set_target_properties(obs-icecast PROPERTIES
         BUILD_WITH_INSTALL_RPATH TRUE
         INSTALL_RPATH "@executable_path/../Frameworks"
     )
 else()
-    target_link_libraries(obs-shoutcast PRIVATE
+    target_link_libraries(obs-icecast PRIVATE
         OBS::libobs
         PkgConfig::LIBAVCODEC
         PkgConfig::LIBAVUTIL
     )
 endif()
 
-target_compile_definitions(obs-shoutcast PRIVATE
+target_compile_definitions(obs-icecast PRIVATE
     PLUGIN_VERSION="${CMAKE_PROJECT_VERSION}"
 )
 
 # Remove "lib" prefix from output filename
-set_target_properties(obs-shoutcast PROPERTIES PREFIX "")
+set_target_properties(obs-icecast PROPERTIES PREFIX "")
 
 # ── macOS .plugin bundle ─────────────────────────────────────────────
 if(APPLE)
     set(PLUGIN_VERSION "${CMAKE_PROJECT_VERSION}")
     configure_file(cmake/Info.plist.in ${CMAKE_BINARY_DIR}/Info.plist)
 
-    set_target_properties(obs-shoutcast PROPERTIES
+    set_target_properties(obs-icecast PROPERTIES
         SUFFIX ""
         BUNDLE TRUE
         BUNDLE_EXTENSION "plugin"
@@ -234,12 +234,12 @@ if(APPLE)
     )
 
     # Copy locale data into the bundle's Resources directory
-    add_custom_command(TARGET obs-shoutcast POST_BUILD
+    add_custom_command(TARGET obs-icecast POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E make_directory
-            "$<TARGET_BUNDLE_DIR:obs-shoutcast>/Contents/Resources/locale"
+            "$<TARGET_BUNDLE_DIR:obs-icecast>/Contents/Resources/locale"
         COMMAND ${CMAKE_COMMAND} -E copy_directory
             "${CMAKE_SOURCE_DIR}/data/locale"
-            "$<TARGET_BUNDLE_DIR:obs-shoutcast>/Contents/Resources/locale"
+            "$<TARGET_BUNDLE_DIR:obs-icecast>/Contents/Resources/locale"
         COMMENT "Copying locale data into plugin bundle"
     )
 endif()
@@ -247,11 +247,11 @@ endif()
 # ── Installation ─────────────────────────────────────────────────────
 if(APPLE)
     # Install the complete .plugin bundle
-    install(DIRECTORY "${CMAKE_BINARY_DIR}/obs-shoutcast.plugin"
+    install(DIRECTORY "${CMAKE_BINARY_DIR}/obs-icecast.plugin"
         DESTINATION .
         USE_SOURCE_PERMISSIONS
     )
 else()
-    install(TARGETS obs-shoutcast LIBRARY DESTINATION obs-shoutcast/bin/64bit)
-    install(DIRECTORY data/ DESTINATION obs-shoutcast/data)
+    install(TARGETS obs-icecast LIBRARY DESTINATION obs-icecast/bin/64bit)
+    install(DIRECTORY data/ DESTINATION obs-icecast/data)
 endif()

@@ -5,15 +5,15 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleDisplayName</key>
-	<string>obs-shoutcast</string>
+	<string>obs-icecast</string>
 	<key>CFBundleExecutable</key>
-	<string>obs-shoutcast</string>
+	<string>obs-icecast</string>
 	<key>CFBundleIdentifier</key>
-	<string>io.github.nurettinselim.obs-shoutcast</string>
+	<string>io.github.nurettinselim.obs-icecast</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>obs-shoutcast</string>
+	<string>obs-icecast</string>
 	<key>CFBundlePackageType</key>
 	<string>BNDL</string>
 	<key>CFBundleShortVersionString</key>

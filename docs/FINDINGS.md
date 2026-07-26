@@ -1,6 +1,6 @@
 # Engineering findings
 
-Working notes for `obs-shoutcast`: what the wire protocol actually looks like,
+Working notes for `obs-icecast`: what the wire protocol actually looks like,
 what was measured against a real server, and — most importantly — **what does
 not work**, so nobody spends a day re-attempting a dead end.
 
@@ -26,7 +26,7 @@ one TCP socket.
 SOURCE /<mount> HTTP/1.0\r\n
 Authorization: Basic <base64(username ":" password)>\r\n
 Host: <server>:<port>\r\n
-User-Agent: obs-shoutcast/<version>\r\n
+User-Agent: obs-icecast/<version>\r\n
 Content-Type: audio/mpeg\r\n
 ice-name: <station name>\r\n
 ice-genre: <genre>\r\n
@@ -56,7 +56,7 @@ listener:
 SOURCE / HTTP/1.0
 Authorization: Basic <redacted>
 Host: 127.0.0.1:9099
-User-Agent: obs-shoutcast/1.0.0
+User-Agent: obs-icecast/1.0.0
 Content-Type: audio/mpeg
 ice-name: Radyo ÖzÜ
 ice-genre: Various
@@ -102,7 +102,7 @@ Icecast form — **one free-text `song=` parameter, nothing else**:
 GET /admin/metadata?mode=updinfo&mount=<mount>&song=<pct-encoded> HTTP/1.0\r\n
 Authorization: Basic <base64>\r\n
 Host: <server>:<port>\r\n
-User-Agent: obs-shoutcast/<version>\r\n
+User-Agent: obs-icecast/<version>\r\n
 \r\n
 ```
 
@@ -260,7 +260,7 @@ have no audio-only mode, so an HTTP/Icecast audio stream is outside what they
 can express.
 
 The plugin therefore runs its own output. The built-in Stream output, the
-built-in Recording output, and this `shoutcast_output` are three independent
+built-in Recording output, and this `icecast_output` are three independent
 outputs and run concurrently.
 
 What *is* possible — and is implemented — is subscribing to the frontend's
@@ -317,12 +317,12 @@ size proves only that the kernel accepted them.
 
 ### 4.1 No audio on the wire
 
-**Symptom.** The handshake succeeded, the log said `[shoutcast] streaming
+**Symptom.** The handshake succeeded, the log said `[icecast] streaming
 started`, the dock showed `● Live`, metadata updates landed — and the server
 received **0 bytes of audio**. A station would have gone "live" and broadcast
 pure silence.
 
-**Cause.** `shoutcast_start()` called `obs_output_begin_data_capture()` without
+**Cause.** `icecast_start()` called `obs_output_begin_data_capture()` without
 first calling `obs_output_initialize_encoders()`. Without that call the audio
 encoder is never started, so no packets are ever produced and
 `encoded_packet` is never invoked. Every in-tree encoded output does both, e.g.
@@ -335,8 +335,8 @@ if (!obs_output_initialize_encoders(stream->output, 0))
         return false;
 ```
 
-**Fix.** Both calls now guard `shoutcast_start()` in
-`src/shoutcast-output.c`.
+**Fix.** Both calls now guard `icecast_start()` in
+`src/icecast-output.c`.
 
 **Why it hid.** Nothing upstream fails. The socket connects, the protocol is
 correct, the UI is correct. Only counting bytes at the far end reveals it —
@@ -365,7 +365,7 @@ Tried to call obs_frontend_remove_event_callback with no callbacks!
 Tried to call obs_frontend_remove_dock with no callbacks!
 ```
 
-No `[obs-shoutcast] plugin unloaded`, no profiler summary, no
+No `[obs-icecast] plugin unloaded`, no profiler summary, no
 `Number of memory leaks:` line — OBS was dying part-way through shutdown. Easy
 to miss, because the process still "exits" and nothing is obviously broken
 until you compare against a healthy shutdown.
@@ -403,7 +403,7 @@ already gone, which is what the two warnings were saying.
 **After the fix**, shutdown runs to completion:
 
 ```
-[obs-shoutcast] plugin unloaded
+[obs-icecast] plugin unloaded
 Number of memory leaks: 0
 ```
 
@@ -545,7 +545,7 @@ Run on 2026-07-26 against OBS Studio 32.2.1 on macOS (Apple Silicon).
 |---|---|---|
 | 1 | Build attributes portable | **pass** — arm64, minos 13.0, relative rpath, 0 Homebrew refs, Info.plist bound |
 | 2 | New code present in binary | **pass** — `SOURCE`, `Authorization`, `ice-audio-info`, `admin/metadata`, `radioco_dock` all found |
-| 3 | Plugin loads, dock registers | **pass** — `[obs-shoutcast] plugin loaded (version 1.0.0)`, `Radio.co dock registered`, `shoutcast_mp3 (MP3 Encoder (LAME))`, no `incompatible` |
+| 3 | Plugin loads, dock registers | **pass** — `[obs-icecast] plugin loaded (version 1.0.0)`, `Radio.co dock registered`, `icecast_mp3 (MP3 Encoder (LAME))`, no `incompatible` |
 | 3b | Dock renders correctly | **pass** — all fields present with correct defaults (`source`, `/`, port 80, 128 kbps); **Apply Name** and **Update** correctly disabled while idle |
 | 4 | Handshake + metadata bytes | **pass** — see §1.1 and §1.3; both protocol branches produce correct bytes, auth header byte-identical to the live-proven value |
 | 4b | UTF-8 percent-encoding | **pass** — exact round-trip, uppercase hex, `%20` not `+` |
@@ -554,7 +554,7 @@ Run on 2026-07-26 against OBS Studio 32.2.1 on macOS (Apple Silicon).
 | 7 | Clean start/stop cycle | **pass** — `streaming started` → `streaming stopped`, `obs_output_active` false at release, no leaked socket |
 | 8 | Clean cutover from the Lua script | **pass** — `tools/shoutcast-control.lua` deleted and its registration removed from the scene collection; no `[Lua: …]` lines remain |
 | 9 | Audio still flows after the teardown fix | **pass** — 254,592 bytes / 663 frames / 128 kbps / 48 kHz, no regression |
-| 10 | Graceful quit is clean | **pass** — `[obs-shoutcast] plugin unloaded` then `Number of memory leaks: 0`, full profiler summary printed, no `remove_dock with no callbacks`. Before the §4.2 fix the log stopped dead at that warning. |
+| 10 | Graceful quit is clean | **pass** — `[obs-icecast] plugin unloaded` then `Number of memory leaks: 0`, full profiler summary printed, no `remove_dock with no callbacks`. Before the §4.2 fix the log stopped dead at that warning. |
 | 11 | Redistributable round-trips | **pass** — zip extracts, `codesign --verify` reports *valid on disk* and *satisfies its Designated Requirement*, attributes unchanged |
 | 12 | Endpoint comparison | **pass** — `.dj.radio.co` accepted 135,168 B (= `SO_SNDBUF`) and stalled even at a 75 s timeout; `maple.radio.co:4193` took 640,557 B over 40 s with no stall |
 | 13 | **Live on air through the plugin** | **pass** — `source.type` `automated` → **`live` in 7 s**, held ~45 s, `[icy] connected to maple.radio.co:4192 (source port 4193, 128 kbps)`, **zero** `send failed`, clean return to `automated` |

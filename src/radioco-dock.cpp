@@ -1,5 +1,5 @@
 /*
- * obs-shoutcast - audio-only MP3 streaming output for OBS Studio
+ * obs-icecast - audio-only MP3 streaming output for OBS Studio
  * Copyright (C) 2026 Nurettin Selim
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -412,7 +412,7 @@ void RadioCoDock::startOutput(bool asAutoStart)
 
 	obs_data_t *es = obs_data_create();
 	obs_data_set_int(es, "bitrate", bitrate);
-	encoder = obs_audio_encoder_create("shoutcast_mp3", "Radio.co MP3", es,
+	encoder = obs_audio_encoder_create("icecast_mp3", "Radio.co MP3", es,
 					   0, nullptr);
 	obs_data_release(es);
 
@@ -424,7 +424,7 @@ void RadioCoDock::startOutput(bool asAutoStart)
 	obs_encoder_set_audio(encoder, obs_get_audio());
 
 	obs_data_t *os = buildOutputSettings();
-	output = obs_output_create("shoutcast_output", "Radio.co Output", os,
+	output = obs_output_create("icecast_output", "Radio.co Output", os,
 				   nullptr);
 	obs_data_release(os);
 
@@ -783,7 +783,7 @@ void radioco_dock_init(void)
 	dock = new RadioCoDock();
 
 	if (!obs_frontend_add_dock_by_id(DOCK_ID, DOCK_TITLE, dock)) {
-		blog(LOG_ERROR, "[obs-shoutcast] failed to register dock");
+		blog(LOG_ERROR, "[obs-icecast] failed to register dock");
 		/* Registration failed, so nothing reparented it — we own it. */
 		delete dock;
 		dock = nullptr;
@@ -791,7 +791,7 @@ void radioco_dock_init(void)
 	}
 
 	obs_frontend_add_event_callback(frontend_event, dock);
-	blog(LOG_INFO, "[obs-shoutcast] " DOCK_TITLE " dock registered");
+	blog(LOG_INFO, "[obs-icecast] " DOCK_TITLE " dock registered");
 }
 
 void radioco_dock_free(void)
