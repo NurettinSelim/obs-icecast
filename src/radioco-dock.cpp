@@ -24,6 +24,7 @@
 #include <obs-module.h>
 #include <obs-frontend-api.h>
 #include <util/platform.h>
+#include <util/config-file.h>
 
 #include <QWidget>
 #include <QFormLayout>
@@ -147,6 +148,56 @@ static bool scan_track_source(void *param, obs_source_t *src)
 	return true;
 }
 
+/*
+ * True once OBS_FRONTEND_EVENT_FINISHED_LOADING has fired.
+ *
+ * obs_frontend_get_streaming_output() is NOT safe before that, despite the
+ * frontend API's null-callbacks guard: the callback itself dereferences
+ * main->outputHandler unconditionally (frontend OBSStudioAPI.cpp:402) and
+ * that unique_ptr is still null while modules are loading. Calling it from
+ * this dock's constructor — which runs in obs_module_post_load — segfaults
+ * OBS at startup with KERN_INVALID_ADDRESS 0x38.
+ */
+static bool frontend_ready = false;
+
+/*
+ * Which mix OBS's own stream output encodes — "what the video platform hears".
+ *
+ * Simple output mode hardcodes mixer 0 (frontend SimpleOutput.cpp:200,202);
+ * Advanced mode reads AdvOut/TrackIndex, 1-based (AdvancedOutput.cpp:184).
+ * A live streaming output is authoritative over both, so ask it first — that
+ * also covers services that impose their own track.
+ */
+static int obs_stream_mixer_index(void)
+{
+	if (!frontend_ready)
+		return 0;
+
+	obs_output_t *out = obs_frontend_get_streaming_output();
+	if (out) {
+		obs_encoder_t *enc = obs_output_get_audio_encoder(out, 0);
+		const int idx = enc ? (int)obs_encoder_get_mixer_index(enc)
+				    : -1;
+		obs_output_release(out);
+		if (idx >= 0 && idx < MAX_AUDIO_MIXES)
+			return idx;
+	}
+
+	config_t *cfg = obs_frontend_get_profile_config();
+	if (cfg) {
+		const char *mode = config_get_string(cfg, "Output", "Mode");
+		if (mode && strcmp(mode, "Advanced") == 0) {
+			const int idx =
+				(int)config_get_int(cfg, "AdvOut",
+						    "TrackIndex") - 1;
+			if (idx >= 0 && idx < MAX_AUDIO_MIXES)
+				return idx;
+		}
+	}
+
+	return 0;
+}
+
 /* ------------------------------------------------------------------ */
 
 class RadioCoDock : public QWidget {
@@ -183,6 +234,7 @@ private:
 	void saveSettings();
 	void refreshControls();
 	void updateTrackStatus();
+	int selectedMixerIndex() const;
 	obs_data_t *buildOutputSettings() const;
 
 	QComboBox *protocolBox = nullptr;
@@ -213,6 +265,7 @@ private:
 	QString connectedName;
 	bool pendingRestart = false;
 	bool autoStarted = false;
+	int activeMixerIndex = -1;
 	bool shuttingDown = false;
 	bool loading = false;
 };
@@ -320,11 +373,14 @@ void RadioCoDock::buildSettingsDialog()
 	form->addRow(QStringLiteral("Bitrate"), bitrateBox);
 
 	trackBox = new QComboBox(settingsDialog);
+	trackBox->addItem(QStringLiteral("Same as OBS stream"), -1);
 	for (int i = 0; i < MAX_AUDIO_MIXES; i++)
 		trackBox->addItem(QStringLiteral("Track %1").arg(i + 1), i);
 	trackBox->setToolTip(QStringLiteral(
-		"Which OBS audio track feeds the radio stream. Assign sources "
-		"to tracks in Edit \u2192 Advanced Audio Properties."));
+		"Which OBS audio track feeds the radio stream. "
+		"\"Same as OBS stream\" follows the track the video platform "
+		"gets. Assign sources to tracks in Edit \u2192 Advanced Audio "
+		"Properties."));
 	form->addRow(QStringLiteral("Audio track"), trackBox);
 
 	trackInfoLabel = new QLabel(settingsDialog);
@@ -493,12 +549,13 @@ void RadioCoDock::startOutput(bool asAutoStart)
 	}
 
 	const int bitrate = bitrateBox->currentData().toInt();
-	const size_t track = (size_t)trackBox->currentData().toInt();
+	const int track = selectedMixerIndex();
+	activeMixerIndex = track;
 
 	obs_data_t *es = obs_data_create();
 	obs_data_set_int(es, "bitrate", bitrate);
 	encoder = obs_audio_encoder_create("icecast_mp3", "Radio.co MP3", es,
-					   track, nullptr);
+					   (size_t)track, nullptr);
 	obs_data_release(es);
 
 	if (!encoder) {
@@ -508,14 +565,16 @@ void RadioCoDock::startOutput(bool asAutoStart)
 	}
 	obs_encoder_set_audio(encoder, obs_get_audio());
 
-	blog(LOG_INFO, "[obs-icecast] streaming OBS audio track %zu",
-	     track + 1);
+	blog(LOG_INFO, "[obs-icecast] streaming OBS audio track %d%s",
+	     track + 1,
+	     trackBox->currentData().toInt() < 0 ? " (same as OBS stream)"
+						 : "");
 
-	track_scan scan{(int)track, true, 0, {}};
+	track_scan scan{track, true, 0, {}};
 	obs_enum_sources(scan_track_source, &scan);
 	if (scan.on_air == 0)
 		blog(LOG_WARNING,
-		     "[obs-icecast] track %zu has no audio sources; the "
+		     "[obs-icecast] track %d has no audio sources; the "
 		     "stream will be silent",
 		     track + 1);
 
@@ -602,6 +661,7 @@ void RadioCoDock::releaseOutput()
 		encoder = nullptr;
 	}
 	autoStarted = false;
+	activeMixerIndex = -1;
 }
 
 /* ------------------------------------------------------------------ */
@@ -676,6 +736,17 @@ void RadioCoDock::onTrackChanged()
 	refreshControls();
 }
 
+/*
+ * The combo stores -1 for "Same as OBS stream"; every other consumer wants a
+ * real 0-based mixer index, resolved fresh so a profile or output-mode change
+ * in OBS is picked up without the user touching this dialog.
+ */
+int RadioCoDock::selectedMixerIndex() const
+{
+	const int data = trackBox->currentData().toInt();
+	return data < 0 ? obs_stream_mixer_index() : data;
+}
+
 void RadioCoDock::onTick()
 {
 	if (shuttingDown)
@@ -690,6 +761,25 @@ void RadioCoDock::onTick()
 				.arg(secs / 3600, 2, 10, QLatin1Char('0'))
 				.arg((secs / 60) % 60, 2, 10, QLatin1Char('0'))
 				.arg(secs % 60, 2, 10, QLatin1Char('0')));
+	}
+
+	/*
+	 * Following OBS's stream track means following it when it moves —
+	 * switching output mode or AdvOut/TrackIndex changes the answer, and
+	 * the mixer index cannot be retuned on a live encoder. Restart only
+	 * from a settled live output, so this never races a pending restart.
+	 */
+	if (output && obs_output_active(output) && !pendingRestart &&
+	    activeMixerIndex >= 0 && selectedMixerIndex() != activeMixerIndex) {
+		blog(LOG_INFO,
+		     "[obs-icecast] OBS stream track moved %d -> %d; "
+		     "reconnecting",
+		     activeMixerIndex + 1, selectedMixerIndex() + 1);
+		pendingRestart = true;
+		stopOutput();
+		statusLabel->setText(
+			QStringLiteral("Following OBS stream track\u2026"));
+		return;
 	}
 	updateTrackStatus();
 	refreshControls();
@@ -776,10 +866,11 @@ void RadioCoDock::refreshControls()
  */
 void RadioCoDock::updateTrackStatus()
 {
-	track_scan scan{trackBox->currentData().toInt(), false, 0, {}};
+	track_scan scan{selectedMixerIndex(), false, 0, {}};
 	obs_enum_sources(scan_track_source, &scan);
 
 	const bool silent = scan.on_air == 0;
+	const bool following = trackBox->currentData().toInt() < 0;
 
 	if (silent)
 		silentWarnLabel->setText(
@@ -789,18 +880,35 @@ void RadioCoDock::updateTrackStatus()
 	silentWarnLabel->setVisible(silent);
 
 	/* The detailed list is only worth building while it is on screen. */
-	if (settingsDialog->isVisible())
-		trackInfoLabel->setText(
-			silent ? QStringLiteral(
-					 "No audio sources on this track.")
-			       : QStringLiteral("On air: %1")
-					 .arg(scan.names.join(
-						 QStringLiteral(", "))));
+	if (!settingsDialog->isVisible())
+		return;
+
+	/*
+	 * When following OBS, name the track it resolved to — otherwise the
+	 * combo says "Same as OBS stream" and nothing says which mix that is.
+	 */
+	const QString prefix =
+		following ? QStringLiteral("OBS streams track %1. ")
+				    .arg(scan.track + 1)
+			  : QString();
+
+	trackInfoLabel->setText(
+		prefix + (silent ? QStringLiteral(
+					   "No audio sources on this track.")
+				 : QStringLiteral("On air: %1")
+					   .arg(scan.names.join(
+						   QStringLiteral(", ")))));
 }
 
 void RadioCoDock::handleFrontendEvent(obs_frontend_event event)
 {
 	switch (event) {
+	case OBS_FRONTEND_EVENT_FINISHED_LOADING:
+		/* Only now is it safe to ask the frontend about outputs. */
+		frontend_ready = true;
+		updateTrackStatus();
+		break;
+
 	case OBS_FRONTEND_EVENT_EXIT:
 		/*
 		 * This is the last safe point to touch the output: OBS
@@ -854,7 +962,7 @@ void RadioCoDock::loadSettings()
 	obs_data_set_default_string(s, "password", "");
 	obs_data_set_default_string(s, "station_name", "OBS Stream");
 	obs_data_set_default_int(s, "bitrate", 128);
-	obs_data_set_default_int(s, "mixer_index", 0);
+	obs_data_set_default_int(s, "mixer_index", -1);
 	obs_data_set_default_string(s, "song", "");
 	obs_data_set_default_bool(s, "follow_obs", false);
 
@@ -877,12 +985,15 @@ void RadioCoDock::loadSettings()
 	const int bitrateIdx = bitrateBox->findData(bitrate);
 	bitrateBox->setCurrentIndex(bitrateIdx >= 0 ? bitrateIdx : 2);
 
-	/* Clamp: a settings file from another machine or a future version
-	 * must not hand libobs an out-of-range mixer index. */
-	int track = (int)obs_data_get_int(s, "mixer_index");
-	if (track < 0 || track >= MAX_AUDIO_MIXES)
-		track = 0;
-	trackBox->setCurrentIndex(track);
+	/*
+	 * -1 means "Same as OBS stream". Anything else is a 0-based mixer
+	 * index and must exist in the combo: a settings file from another
+	 * machine, hand-edited, or written by a future version must never
+	 * hand libobs an out-of-range index.
+	 */
+	const int track = (int)obs_data_get_int(s, "mixer_index");
+	const int trackIdx = trackBox->findData(track);
+	trackBox->setCurrentIndex(trackIdx >= 0 ? trackIdx : 0);
 
 	nowPlayingEdit->setText(
 		QString::fromUtf8(obs_data_get_string(s, "song")));

@@ -499,6 +499,53 @@ would have exposed it — how loud the received audio is — is not something a
 byte counter reports. §4.1 taught that a handshake proves nothing; this one
 adds that a *byte count* proves nothing either. Decode the audio.
 
+**Follow-up: "same as OBS stream".** Picking a track by hand still leaves the
+radio and the video platform free to drift apart, so the default became a
+sentinel (`mixer_index = -1`) that resolves to whichever mix OBS's own stream
+output encodes. That is knowable exactly, not guessable:
+
+| Output mode | Stream mixer index | Source |
+|---|---|---|
+| Simple | `0` — always Track 1, hardcoded | `SimpleOutput.cpp:200,202` |
+| Advanced | `AdvOut/TrackIndex - 1` | `AdvancedOutput.cpp:184` |
+| Streaming already running | `obs_encoder_get_mixer_index()` of the output's audio encoder 0 | authoritative, so tried first |
+
+Nothing forces source masks onto track 1 in Simple mode — the only writer of
+`obs_source_set_audio_mixers` in the frontend is the Advanced Audio Properties
+dialog (`OBSAdvAudioCtrl.cpp:579`) — so "Simple mode streams everything" is
+false. On this machine Simple mode meant Kick was getting Track 1, and Track 1
+held one muted mic: `[obs-icecast] track 1: 'Mic/Aux' muted`. The video
+platform was as silent as the radio.
+
+**Two traps found building it.** First, `obs_frontend_get_streaming_output()`
+is *not* safe during `obs_module_post_load`: the frontend API null-guards the
+callbacks pointer but the callback body dereferences `main->outputHandler`
+unconditionally (`OBSStudioAPI.cpp:402`), which is still null then. Calling it
+from the dock constructor killed OBS at startup with `EXC_BAD_ACCESS`
+`KERN_INVALID_ADDRESS at 0x38` and no log line — the resolver now returns 0
+until `OBS_FRONTEND_EVENT_FINISHED_LOADING`. Second, because the mixer index
+is create-time, *following* a moving target means reconnecting when it moves;
+the 1 Hz poll compares the resolved index against the one the live encoder was
+built with and restarts through the existing path.
+
+**Measured**, one uninterrupted "same as OBS stream" session into a local
+sink, with OBS switched from Simple to Advanced/Track 2 mid-broadcast:
+
+```
+21:47:39 OBS stream track moved 1 -> 2; reconnecting
+conn1 (followed track 1, muted mic)      1,517,184 B   mean_volume -91.0 dB
+conn2 (followed track 2, tone playing)   1,014,144 B   mean_volume -15.6 dB
+21:49:51 OBS stream track moved 2 -> 1; reconnecting
+```
+
+Merging tracks was considered and rejected: `obs_audio_encoder_create` takes
+one mixer index and libobs exposes no summed-mix encoder, so it would mean
+pulling raw mixes through `obs_add_raw_audio_callback` and driving LAME
+directly — replacing the whole encoder contract to reimplement what a track
+already is. A track *is* a mix; two sources on one track is the supported
+answer, and it keeps the radio matching the video platform instead of
+diverging from it.
+
 **Lesson for all four bugs.** None is visible from the UI, the log's happy
 path, or a code read. One needed byte counting at the far end of the socket,
 one a diff against a known-good shutdown log, one a port-by-port handshake
@@ -629,9 +676,12 @@ Run on 2026-07-26 against OBS Studio 32.2.1 on macOS (Apple Silicon).
 | 18 | Track switch on a live feed | **pass** — switching track 4 → 2 while live reconnected: sink logged `conn1 closed bytes=522240` then `accepted conn2`, dock timer reset and returned to `● Live` |
 | 19 | Empty track does not block connect | **pass** — connecting on track 4 logged `track 4 has no audio sources; the stream will be silent` and streamed 366,720 B of silence rather than refusing |
 | 20 | **Quitting OBS while live** | **pass** — `OBS → Quit` with a feed running ended with the full profiler summary and `Number of memory leaks: 0` |
+| 21 | "Same as OBS stream" resolves correctly | **pass** — Simple mode → `OBS streams track 1.` in the dialog and `streaming OBS audio track 1 (same as OBS stream)` in the log, matching `SimpleOutput.cpp`'s hardcoded mixer 0 |
+| 22 | **Following OBS across a live track change** | **pass** — with the radio live, switching OBS to Advanced / Audio Track 2 logged `OBS stream track moved 1 -> 2; reconnecting` and the sink saw `conn1 closed bytes=1517184` then `accepted conn2`; conn1 `-91.0 dB` (muted mic on track 1), conn2 `-15.6 dB` (tone on track 2). Reverting to Simple logged `moved 2 -> 1` |
+| 23 | Frontend query is startup-safe | **pass** — before the `frontend_ready` gate, resolving at `obs_module_post_load` crashed OBS (`EXC_BAD_ACCESS ... 0x38` in `obs_stream_mixer_index`); after it, three cold starts loaded cleanly with the dock registered |
 
 Verified live against the production station through the finished plugin:
-connecting, going on air, and metadata (checks 13-14). Checks 15-20 were run
+connecting, going on air, and metadata (checks 13-14). Checks 15-23 were run
 against the local sink on 2026-07-26. Still to do on the streaming Mac,
 because they need that machine or a second destination: the station-name
 reconnect, Kick and Radio.co at once, and the follow-OBS checkbox end to end.
