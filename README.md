@@ -124,6 +124,19 @@ the video platform alike. (libobs offers no way to encode a sum of two
 in the plugin would also defeat the point, since the result would no longer
 match what the video platform hears.)
 
+**The multi-select checkboxes in OBS's Output settings are Recording, not
+Streaming.** *Settings → Output* shows `Audio Track ☑1 ☑2 ☑3 ☐4 ☐5 ☐6` under
+**Recording** — that is `SimpleOutput/RecTracks`, a bitmask. Streaming has no
+such control in Simple mode (it is hardcoded to Track 1) and offers single-
+choice radio buttons in Advanced.
+
+Even the recording checkboxes do **not** merge anything: each ticked track is
+written to the file as a *separate* audio stream
+(`obs_output_set_audio_encoder(fileOutput, audioTrack[i], idx++)`), which is
+what an MKV can hold and a live stream cannot. A broadcast — Kick's RTMP or
+this plugin's MP3 — carries exactly one audio stream, so it gets exactly one
+mix. That is the whole reason merging has to happen at the track level.
+
 The settings dialog lists what is on the resolved track right under the combo
 (`OBS streams track 2. On air: Mic/Aux, macOS Screen Capture`), and the dock
 shows a standing warning whenever that track carries nothing:
