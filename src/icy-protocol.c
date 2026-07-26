@@ -272,8 +272,8 @@ static int icy_handshake_shoutcast(int sock_fd,
 		return -1;
 	}
 
-	blog(LOG_INFO, "[icy] connected to %s:%d (bitrate %d kbps)",
-	     params->server, params->port, params->bitrate);
+	blog(LOG_INFO, "[icy] connected to %s:%d (source port %d, %d kbps)",
+	     params->server, params->port, params->port + 1, params->bitrate);
 
 	return sock_fd;
 }
@@ -396,12 +396,23 @@ static int icy_handshake_icecast(int sock_fd, const struct icy_params *params,
 int icy_connect(const struct icy_params *params, char *error_buf,
 		size_t error_len)
 {
-	int sock_fd = icy_tcp_connect(params->server, params->port, error_buf,
+	/*
+	 * SHOUTcast v1 splits its ports: the configured port is the admin /
+	 * listener port and the source port is port + 1. Verified against
+	 * Radio.co's maple endpoint — 4192 never answers a password
+	 * handshake, 4193 replies "OK2\r\nicy-caps:11". butt does the same
+	 * (src/shoutcast.cpp:66-217). Metadata still goes to the base port,
+	 * which is why icy_update_metadata does not apply this offset.
+	 */
+	const bool shoutcast = params->protocol == PROTOCOL_SHOUTCAST_V1;
+	const int port = shoutcast ? params->port + 1 : params->port;
+
+	int sock_fd = icy_tcp_connect(params->server, port, error_buf,
 				      error_len);
 	if (sock_fd < 0)
 		return -1;
 
-	if (params->protocol == PROTOCOL_SHOUTCAST_V1)
+	if (shoutcast)
 		return icy_handshake_shoutcast(sock_fd, params, error_buf,
 					       error_len);
 

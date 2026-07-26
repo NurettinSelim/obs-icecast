@@ -57,12 +57,12 @@ Open **View → Docks → Radio.co**.
 
 | Field | Notes |
 |---|---|
-| Protocol | `Icecast (HTTP SOURCE)` (default) or `SHOUTcast v1 (legacy ICY)` |
-| Server | Ingest hostname, e.g. `<your-station>.dj.radio.co` |
-| Port | `80` for Radio.co |
-| Username | `source` |
-| Mount | `/` for Radio.co — a Liquidsoap harbor exposes only the bare mount |
-| Password | The broadcast password from your Radio.co dashboard |
+| Protocol | `SHOUTcast v1 (legacy ICY)` for Radio.co; `Icecast (HTTP SOURCE)` for a normal Icecast server |
+| Server | Ingest hostname, e.g. `maple.radio.co` |
+| Port | The port your host lists, e.g. `4192`. **SHOUTcast v1 streams on port + 1** — the plugin adds it, so enter the number as given |
+| Username | `source` (Icecast only; ignored by SHOUTcast v1) |
+| Mount | `/` (Icecast only; ignored by SHOUTcast v1) |
+| Password | The broadcast password from your dashboard. SHOUTcast v1 wants the short token; Icecast wants the long base64 blob |
 | Station | Sent as `ice-name` when connecting |
 | Bitrate | 64 – 320 kbps |
 
@@ -142,8 +142,10 @@ keeps using the old ones.
 | `Invalid username or password` | HTTP 401. Username is `source`; re-copy the broadcast password from the dashboard. |
 | `Mount point … not found on server` | HTTP 404 — wrong mount. Radio.co uses the bare `/`; anything else 404s. |
 | `Mount point … is already in use` | HTTP 403 — another source (butt, a phone app, another OBS) is still connected. Disconnect it first. |
-| Connects and shows `● Live`, but the station stays `automated` | The stream is arriving but the station is not accepting it: "Live Anytime" is disabled, or no event is scheduled in the Radio.co dashboard. butt reports the same condition at `src/shoutcast.cpp:189-191`. |
-| Metadata returns `200` but the title never changes | Titles only land while the source is actually live. Confirm `source.type` is `live` first. |
+| Connects, shows `● Live`, then `send failed: Resource temporarily unavailable` after ~20 s | **Wrong endpoint.** The server authenticated you but is not consuming audio, so the socket buffer fills and `send()` times out. Radio.co's `.dj.radio.co` Icecast harbor does exactly this. Switch to SHOUTcast v1 against the host in your dashboard (`maple.radio.co`-style). Details in [`docs/FINDINGS.md`](docs/FINDINGS.md) §3.6. |
+| SHOUTcast v1 never completes the handshake | You are on the admin port. SHOUTcast v1 sources connect on **port + 1**; the plugin applies this automatically, so enter the base port (e.g. `4192`), not `4193`. |
+| Connects and shows `● Live`, but the station stays `automated` | The stream is arriving but the station is not accepting it: "Live Anytime" is disabled, or no event is scheduled in the dashboard. butt reports the same condition at `src/shoutcast.cpp:189-191`. |
+| Metadata returns `200` but the title never changes | Titles only land while the source is actually live — which makes this a handy liveness check. Confirm `source.type` is `live` first. |
 | Build fails with `FFmpeg major mismatch` | Homebrew's FFmpeg major differs from the one in `OBS.app`. Install the matching formula, or upgrade OBS. |
 | Build fails with `simde headers not found` | `brew install simde`. |
 

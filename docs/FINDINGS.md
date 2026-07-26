@@ -137,51 +137,66 @@ socket.
 
 ## 2. The Radio.co endpoint
 
-Ingest is **`s3ab6bdcb9.dj.radio.co:80`** — the newer "DJ" endpoint. This is
-*not* the `maple.radio.co:4192` entry still sitting in `~/.buttrc`, which is
-the older SHOUTcast v1 endpoint.
+**Use `maple.radio.co:4192` with SHOUTcast v1.** This is the endpoint `~/.buttrc`
+was already configured with, and it is the only one that actually carries
+audio for this station.
 
-It is a **Liquidsoap source harbor**, not stock Icecast: `GET /` returns
-`HTTP/1.0 404 Not found` with `<title>Liquidsoap source harbor</title>`.
+The "DJ" endpoint `s3ab6bdcb9.dj.radio.co:80` looks correct and is not — see
+§3.6. A `200 OK` on the handshake does **not** mean the station will take your
+audio.
 
-**The only mount is the bare `/`.** Probed live:
+### 2.1 The working endpoint
 
-| Request | Response |
+| | |
 |---|---|
-| `SOURCE /` | `401 Unauthorized`, `WWW-Authenticate: Basic realm="Liquidsoap harbor"` |
-| `SOURCE /stream` | `404` |
-| `SOURCE /live` | `404` |
-| `SOURCE /source` | `404` |
-| `SOURCE /radio` | `404` |
-| `SOURCE /mount` | `404` |
-| `SOURCE /s3ab6bdcb9` | `404` |
-| `GET /` | `404`, Liquidsoap source harbor page |
+| Host | `maple.radio.co` |
+| Configured port | `4192` |
+| **Source port** | **`4193` — the configured port + 1** |
+| Protocol | SHOUTcast v1 (`type = 2` in `~/.buttrc`) |
+| Password | the bare 12-char token from the dashboard (hex-looking, e.g. `a1b2c3d4e5f6`) |
 
-A `401` means the mount exists and only the credentials were missing; a `404`
-means it does not. That is the quickest way to re-probe if the endpoint ever
-moves.
+Handshake response is `OK2\r\nicy-caps:11\r\n\r\n`. It authenticates properly —
+a wrong password returns `Invalid password\r\n\r\n`, an empty one returns
+nothing.
 
-Credentials are username `source` plus the broadcast password from the
-Radio.co dashboard. The dashboard displays it URL-encoded (trailing `%3D`);
-the harbor accepts either form, so use the decoded `=` form.
+**The port split is mandatory and is easy to get wrong.** Port `4192` does not
+answer a source handshake at all (it serves HTTP and returns `404 Not found`);
+only `4193` does. butt applies the same `+1`
+(`butt-1.46.0/src/shoutcast.cpp:66-217`). Metadata, however, goes to the
+**base** port `4192` via `/admin.cgi`, so the offset belongs in `icy_connect`
+only and must not be applied in `icy_update_metadata`.
 
-The metadata endpoint is a **real handler, not a catch-all** — verified by
-probing neighbours: `/nonsense` → `404`, `/admin/bogus` → `400`,
-`/admin/metadata` with no query → `400`, `mode=bogus` → `500`.
+### 2.2 Credentials
 
-Live status for checking any of this:
+The two passwords floating around are the same secret in two encodings:
+
+```
+base64("<station-id>-<token>") = "<the long dashboard blob>"
+```
+
+For this station the station-id is `s3ab6bdcb9` and `<token>` is the same
+12-char value `~/.buttrc` stores. The DJ harbor wants the whole base64 blob as
+an HTTP Basic password; SHOUTcast v1 wants the bare token. The Radio.co
+dashboard shows the base64 form URL-encoded with a trailing `%3D`; both that
+and the decoded `=` form authenticate, so the trailing-`%3D` detail is a red
+herring — both were tested and both return `200`.
+
+Neither value is reproduced here. Read them from the Radio.co dashboard, or
+from the `[Radyo ÖzÜ]` section of `~/.buttrc` on the old machine.
+
+### 2.3 Checking state
+
 `https://public.radio.co/stations/s3ab6bdcb9/status` → `source.type` is
-`automated` or `live`, and `current_track.title` is the now-playing string.
+`automated` or `live`, `current_track.title` is the now-playing string.
 
-Measured latencies against the live station: `automated` → `live` in **~11-16
-s** after connecting, metadata visible in **~18 s**, and back to `automated`
-within **~30 s** of disconnecting. `mount` is accepted but not required on the
-metadata call; it is sent anyway to match butt.
+Measured through the finished plugin against the live station:
+`automated` → **`live` within 7 s**, metadata visible on air ~20 s after
+pressing Update, and back to `automated` within ~20 s of disconnecting.
 
-Metadata sent while not streaming returns `200` and does nothing — the source
-must be live for a title to land.
-
----
+**Metadata only lands while the source is live** — this is a reliable liveness
+probe. Verified by control: titles pushed while automated (`authprobe`, `ctl`)
+returned `200` and never appeared in `history`, while a title pushed during a
+live session did.
 
 ## 3. Negative results
 
@@ -252,9 +267,53 @@ What *is* possible — and is implemented — is subscribing to the frontend's
 stream lifecycle events (`OBS_FRONTEND_EVENT_STREAMING_STARTED` / `_STOPPED`),
 which is what the optional *Connect with OBS "Start Streaming"* checkbox uses.
 
+### 3.6 The `.dj.radio.co` Icecast harbor authenticates but silently discards audio
+
+**The most expensive dead end here, because every signal says it is working.**
+
+`s3ab6bdcb9.dj.radio.co:80` is a real Liquidsoap source harbor. It resolves, it
+accepts `SOURCE / HTTP/1.0`, it validates credentials — a wrong password gets
+`401`, the right one gets `HTTP/1.0 200 OK`. The plugin logged
+`[icecast] connected` and `streaming started`, and the dock showed `● Live`.
+
+It then **never reads a single byte of audio.**
+
+Measured with a plain Python socket, no plugin involved:
+
+| Sender | Bytes accepted | Then |
+|---|---|---|
+| 10 s send timeout | 135,168 | `EAGAIN` at t=18.5 s |
+| **75 s** send timeout | **135,168** | `EAGAIN` at t=83.5 s |
+
+`SO_SNDBUF` on that socket is 131,520. So the "accepted" bytes are just the
+local kernel send buffer filling up — the far end consumed **nothing**, and
+waiting four times longer changed nothing, which rules out a slow source-attach.
+
+The same test against `maple.radio.co:4193` pushed **640,557 bytes over 40 s**
+— 4.9× the send buffer — with no stall at all, and the station flipped to
+`live`. That is what a server actually consuming audio looks like.
+
+**The symptom this produced.** Because the kernel buffer holds ~8 s of 128 kbps
+audio and the plugin set `SO_SNDTIMEO` to 10 s, `send()` blocked and returned
+`EAGAIN` about 18-20 s after connecting, every time:
+
+```
+19:31:24.881: [icecast] connected to s3ab6bdcb9.dj.radio.co:80/ (128 kbps)
+19:31:44.006: [icy] send failed: Resource temporarily unavailable
+```
+
+That looked like a plugin bug and was not one. Do not "fix" it by lengthening
+the send timeout or retrying `EAGAIN`; the endpoint is simply wrong for this
+station.
+
+**Lesson.** A `200` handshake proves authentication, nothing more. The only
+proof that an audio endpoint works is bytes being drained over time —
+specifically, more bytes than `SO_SNDBUF`. Anything at or under the send-buffer
+size proves only that the kernel accepted them.
+
 ---
 
-## 4. Two bugs that only a real run exposed
+## 4. Three bugs that only a real run exposed
 
 ### 4.1 No audio on the wire
 
@@ -353,10 +412,34 @@ with no `remove_dock with no callbacks` warning. (Two
 from other bundled plugins, not this one, and were present before this plugin
 was installed.)
 
-**Lesson for both bugs.** Neither is visible from the UI, the log's happy path,
-or a code read. One needed byte counting at the far end of the socket; the
-other needed a diff against a known-good shutdown log. Verify the ends, not the
-middle.
+### 4.3 SHOUTcast v1 connected to the wrong port
+
+**Symptom.** With the protocol set to SHOUTcast v1 and the port set to the
+`4192` from `~/.buttrc`, connecting failed or hung — the plugin was talking to
+the admin/listener port, which never answers a source handshake.
+
+**Cause.** `icy_connect()` passed `params->port` straight to
+`icy_tcp_connect()` for both protocols. SHOUTcast v1 splits its ports: the
+configured port is the admin port and **the source port is port + 1**. butt has
+always done this (`butt-1.46.0/src/shoutcast.cpp:66-217`); the plugin did not.
+
+Measured, with the correct password:
+
+```
+maple.radio.co:4192 -> <no response to the password handshake>
+                       (HTTP GET returns "404 Not found" — it is a web port)
+maple.radio.co:4193 -> OK2\r\nicy-caps:11\r\n\r\n
+```
+
+**Fix.** `icy_connect()` adds `+ 1` for `PROTOCOL_SHOUTCAST_V1` only. The
+offset deliberately does **not** apply to `icy_update_metadata()`, because
+`/admin.cgi` lives on the base port — so the user enters one port, `4192`, and
+both paths land where they should.
+
+**Lesson for all three bugs.** None is visible from the UI, the log's happy
+path, or a code read. One needed byte counting at the far end of the socket,
+one a diff against a known-good shutdown log, one a port-by-port handshake
+probe. Verify the ends, not the middle.
 
 ---
 
@@ -473,13 +556,15 @@ Run on 2026-07-26 against OBS Studio 32.2.1 on macOS (Apple Silicon).
 | 9 | Audio still flows after the teardown fix | **pass** — 254,592 bytes / 663 frames / 128 kbps / 48 kHz, no regression |
 | 10 | Graceful quit is clean | **pass** — `[obs-shoutcast] plugin unloaded` then `Number of memory leaks: 0`, full profiler summary printed, no `remove_dock with no callbacks`. Before the §4.2 fix the log stopped dead at that warning. |
 | 11 | Redistributable round-trips | **pass** — zip extracts, `codesign --verify` reports *valid on disk* and *satisfies its Designated Requirement*, attributes unchanged |
+| 12 | Endpoint comparison | **pass** — `.dj.radio.co` accepted 135,168 B (= `SO_SNDBUF`) and stalled even at a 75 s timeout; `maple.radio.co:4193` took 640,557 B over 40 s with no stall |
+| 13 | **Live on air through the plugin** | **pass** — `source.type` `automated` → **`live` in 7 s**, held ~45 s, `[icy] connected to maple.radio.co:4192 (source port 4193, 128 kbps)`, **zero** `send failed`, clean return to `automated` |
+| 14 | Metadata on air | **pass** — `OBS Plugin Live Test` appeared as `current_track.title` while live |
 
-Checks that require the production station or the second machine — going live
-on Radio.co, metadata on air, the station-name reconnect, both destinations at
-once, the follow-OBS checkbox end to end, and quitting while live — are steps
-8-10 of the rollout and are performed on the streaming Mac. The protocol,
-encoder, output and metadata paths they depend on are all verified above
-against a local server.
+Verified live against the production station through the finished plugin:
+connecting, going on air, and metadata (checks 13-14). Still to do on the
+streaming Mac, because they need that machine or a second destination: the
+station-name reconnect, Kick and Radio.co at once, the follow-OBS checkbox end
+to end, and quitting while live.
 
 ### How to re-run the local end-to-end test
 
