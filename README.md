@@ -124,6 +124,15 @@ the video platform alike. (libobs offers no way to encode a sum of two
 in the plugin would also defeat the point, since the result would no longer
 match what the video platform hears.)
 
+"Sums" is literal. Each audio tick (1024 frames, ~21 ms at 48 kHz) libobs
+copies a source's samples into the buffer of every track its mask names, then
+adds them together with `*(mix++) += *(aud++);` (`obs-audio.c:90`) — plain
+float addition, no bus, no auto-gain — and clamps the result to −1.0…+1.0
+**after** summing (`audio-io.c:132`). So two sources on one track can clip a
+track that neither would clip alone: pull the mic and desktop faders down a
+few dB when you merge them, and watch the mixer meter rather than trusting
+that "it was fine before".
+
 **The multi-select checkboxes in OBS's Output settings are Recording, not
 Streaming.** *Settings → Output* shows `Audio Track ☑1 ☑2 ☑3 ☐4 ☐5 ☐6` under
 **Recording** — that is `SimpleOutput/RecTracks`, a bitmask. Streaming has no
