@@ -9,7 +9,7 @@
 	<key>CFBundleExecutable</key>
 	<string>obs-shoutcast</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.obsproject.obs-shoutcast</string>
+	<string>io.github.nurettinselim.obs-shoutcast</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>

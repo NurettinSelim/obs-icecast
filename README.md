@@ -120,7 +120,7 @@ cd obs-shoutcast
 cmake -S . -B build
 cmake --build build
 
-codesign --force --sign - --identifier com.obsproject.obs-shoutcast \
+codesign --force --sign - --identifier io.github.nurettinselim.obs-shoutcast \
          --timestamp=none build/obs-shoutcast.plugin
 
 ditto -c -k --keepParent build/obs-shoutcast.plugin \
@@ -183,3 +183,14 @@ integration.
 [`docs/FINDINGS.md`](docs/FINDINGS.md) — the wire protocol byte for byte, what
 was measured against the live endpoint, the approaches that do **not** work and
 why, the build/ABI constraints, and the verification log.
+
+---
+
+## License
+
+GPL-2.0-or-later — see [`LICENSE`](LICENSE).
+
+This plugin links `libobs`, which is GPLv2, so it is licensed to match. The
+protocol behaviour was reimplemented from scratch in C after studying
+[butt](https://danielnoethen.de/butt/) (also GPLv2) as a reference for what
+these servers actually accept; no butt code is included here.
