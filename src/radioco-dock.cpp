@@ -15,13 +15,62 @@
 #include <QCheckBox>
 #include <QPushButton>
 #include <QLabel>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QTimer>
 #include <QElapsedTimer>
 #include <QMetaObject>
 #include <QPointer>
+#include <QIcon>
+#include <QPixmap>
+#include <QPainter>
+#include <QPainterPath>
+#include <QTransform>
 
 #define DOCK_ID "radioco_dock"
 #define DOCK_TITLE "Radio.co"
+
+/* ------------------------------------------------------------------ */
+
+/*
+ * The gear is painted, not typed: U+2699 renders as an empty box under the
+ * OBS theme's font, and the plugin ships no icon assets. Three rounded bars
+ * through the centre make six teeth — few and chunky so the shape still
+ * reads as a gear at 16 px; a disc joins them and the hub is cut out.
+ * Drawn at 64 px and scaled down by QIcon, so it stays sharp on Retina.
+ */
+static QIcon make_gear_icon(const QColor &color)
+{
+	const qreal s = 64.0;
+	const qreal c = s / 2.0;
+
+	QPainterPath path;
+	for (int i = 0; i < 3; i++) {
+		QPainterPath tooth;
+		tooth.addRoundedRect(QRectF(-s * 0.15, -s * 0.46, s * 0.30,
+					    s * 0.92),
+				     s * 0.05, s * 0.05);
+		QTransform t;
+		t.translate(c, c);
+		t.rotate(i * 60.0);
+		path.addPath(t.map(tooth));
+	}
+	path.addEllipse(QPointF(c, c), s * 0.32, s * 0.32);
+	path = path.simplified();
+
+	QPainterPath hub;
+	hub.addEllipse(QPointF(c, c), s * 0.175, s * 0.175);
+	path = path.subtracted(hub);
+
+	QPixmap pm((int)s, (int)s);
+	pm.fill(Qt::transparent);
+	QPainter p(&pm);
+	p.setRenderHint(QPainter::Antialiasing);
+	p.fillPath(path, color);
+	p.end();
+
+	return QIcon(pm);
+}
 
 /* ------------------------------------------------------------------ */
 
@@ -47,11 +96,13 @@ private slots:
 	void onApplyNameClicked();
 	void onTick();
 	void onFieldChanged();
+	void onSettingsClicked();
 
 private:
 	void startOutput(bool asAutoStart);
 	void stopOutput();
 	void releaseOutput();
+	void buildSettingsDialog();
 	void loadSettings();
 	void saveSettings();
 	void refreshControls();
@@ -71,6 +122,8 @@ private:
 	QCheckBox *followObsBox = nullptr;
 	QPushButton *connectButton = nullptr;
 	QLabel *statusLabel = nullptr;
+	QDialog *settingsDialog = nullptr;
+	QPushButton *settingsButton = nullptr;
 	QTimer *tickTimer = nullptr;
 
 	obs_output_t *output = nullptr;
@@ -129,51 +182,98 @@ static void handle_reconnect_success(void *data, calldata_t *cd)
 
 /* ------------------------------------------------------------------ */
 
-RadioCoDock::RadioCoDock(QWidget *parent) : QWidget(parent)
+/*
+ * The station's connection details are set once and then never touched, so
+ * they live in a dialog behind the gear button instead of the dock body.
+ * The widgets stay RadioCoDock members and keep their onFieldChanged wiring —
+ * only their parent moves — so load/save/buildOutputSettings are unaffected.
+ * The dialog is a child of the dock, so Qt frees it with the dock; nothing
+ * here is ever deleted by hand.
+ */
+void RadioCoDock::buildSettingsDialog()
 {
-	setObjectName(DOCK_ID);
+	settingsDialog = new QDialog(this);
+	settingsDialog->setObjectName(QStringLiteral("radioco_settings"));
+	settingsDialog->setWindowTitle(QStringLiteral("Radio.co Settings"));
 
-	auto *root = new QVBoxLayout(this);
+	auto *layout = new QVBoxLayout(settingsDialog);
 	auto *form = new QFormLayout();
 	form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
 
-	protocolBox = new QComboBox(this);
+	protocolBox = new QComboBox(settingsDialog);
 	protocolBox->addItem(QStringLiteral("Icecast (HTTP SOURCE)"), 0);
 	protocolBox->addItem(QStringLiteral("SHOUTcast v1 (legacy ICY)"), 1);
 	form->addRow(QStringLiteral("Protocol"), protocolBox);
 
-	serverEdit = new QLineEdit(this);
+	serverEdit = new QLineEdit(settingsDialog);
 	form->addRow(QStringLiteral("Server"), serverEdit);
 
-	portSpin = new QSpinBox(this);
+	portSpin = new QSpinBox(settingsDialog);
 	portSpin->setRange(1, 65535);
 	portSpin->setValue(80);
 	form->addRow(QStringLiteral("Port"), portSpin);
 
-	usernameEdit = new QLineEdit(this);
+	usernameEdit = new QLineEdit(settingsDialog);
 	form->addRow(QStringLiteral("Username"), usernameEdit);
 
-	mountEdit = new QLineEdit(this);
+	mountEdit = new QLineEdit(settingsDialog);
 	form->addRow(QStringLiteral("Mount"), mountEdit);
 
-	passwordEdit = new QLineEdit(this);
+	passwordEdit = new QLineEdit(settingsDialog);
 	passwordEdit->setEchoMode(QLineEdit::Password);
 	form->addRow(QStringLiteral("Password"), passwordEdit);
 
-	stationEdit = new QLineEdit(this);
-	applyNameButton = new QPushButton(QStringLiteral("Apply Name"), this);
+	stationEdit = new QLineEdit(settingsDialog);
+	applyNameButton =
+		new QPushButton(QStringLiteral("Apply Name"), settingsDialog);
 	applyNameButton->setEnabled(false);
 	auto *stationRow = new QHBoxLayout();
 	stationRow->setContentsMargins(0, 0, 0, 0);
 	stationRow->addWidget(stationEdit, 1);
 	stationRow->addWidget(applyNameButton);
-	form->addRow(QStringLiteral("Station"), stationRow);
+	form->addRow(QStringLiteral("Station name"), stationRow);
 
-	bitrateBox = new QComboBox(this);
+	bitrateBox = new QComboBox(settingsDialog);
 	for (int br : {64, 96, 128, 160, 192, 256, 320})
 		bitrateBox->addItem(QString::number(br), br);
 	bitrateBox->setCurrentIndex(2); /* 128 */
 	form->addRow(QStringLiteral("Bitrate"), bitrateBox);
+
+	layout->addLayout(form);
+
+	/*
+	 * Close, not OK/Cancel: every field persists as it changes through
+	 * onFieldChanged(), so there is nothing to commit or roll back.
+	 */
+	auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close,
+					     settingsDialog);
+	connect(buttons, &QDialogButtonBox::rejected, settingsDialog,
+		&QDialog::hide);
+	layout->addWidget(buttons);
+}
+
+/*
+ * Modeless: Apply Name lives in the dialog but reports through the dock's
+ * status label, which has to stay visible while the dialog is open.
+ */
+void RadioCoDock::onSettingsClicked()
+{
+	settingsDialog->show();
+	settingsDialog->raise();
+	settingsDialog->activateWindow();
+}
+
+RadioCoDock::RadioCoDock(QWidget *parent) : QWidget(parent)
+{
+	setObjectName(DOCK_ID);
+
+	buildSettingsDialog();
+
+	auto *root = new QVBoxLayout(this);
+
+	auto *form = new QFormLayout();
+	form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+	form->setRowWrapPolicy(QFormLayout::WrapLongRows);
 
 	nowPlayingEdit = new QLineEdit(this);
 	updateButton = new QPushButton(QStringLiteral("Update"), this);
@@ -182,7 +282,7 @@ RadioCoDock::RadioCoDock(QWidget *parent) : QWidget(parent)
 	songRow->setContentsMargins(0, 0, 0, 0);
 	songRow->addWidget(nowPlayingEdit, 1);
 	songRow->addWidget(updateButton);
-	form->addRow(QStringLiteral("Now Playing"), songRow);
+	form->addRow(QStringLiteral("Stream name"), songRow);
 
 	root->addLayout(form);
 
@@ -197,8 +297,17 @@ RadioCoDock::RadioCoDock(QWidget *parent) : QWidget(parent)
 	connectButton = new QPushButton(QStringLiteral("Connect"), this);
 	statusLabel = new QLabel(QStringLiteral("Idle"), this);
 	statusLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+	settingsButton = new QPushButton(this);
+	settingsButton->setIcon(make_gear_icon(
+		palette().color(QPalette::WindowText)));
+	settingsButton->setIconSize(QSize(16, 16));
+	settingsButton->setFlat(true);
+	settingsButton->setFixedWidth(28);
+	settingsButton->setToolTip(QStringLiteral("Connection settings"));
+	settingsButton->setAccessibleName(QStringLiteral("Settings"));
 	bottom->addWidget(connectButton);
 	bottom->addWidget(statusLabel, 1);
+	bottom->addWidget(settingsButton);
 	root->addLayout(bottom);
 
 	root->addStretch(1);
@@ -209,6 +318,8 @@ RadioCoDock::RadioCoDock(QWidget *parent) : QWidget(parent)
 		&RadioCoDock::onUpdateClicked);
 	connect(applyNameButton, &QPushButton::clicked, this,
 		&RadioCoDock::onApplyNameClicked);
+	connect(settingsButton, &QPushButton::clicked, this,
+		&RadioCoDock::onSettingsClicked);
 
 	/* Persist on every change, and keep the buttons in step. */
 	connect(protocolBox, &QComboBox::currentIndexChanged, this,
@@ -519,6 +630,8 @@ void RadioCoDock::handleFrontendEvent(obs_frontend_event event)
 		 * destroys the frontend (and with it this widget) before
 		 * obs_module_unload runs.
 		 */
+		if (settingsDialog)
+			settingsDialog->hide();
 		saveSettings();
 		shutdownOutput();
 		break;

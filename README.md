@@ -55,6 +55,11 @@ is almost always this.
 
 Open **View → Docks → Radio.co**.
 
+The dock carries only what a broadcast needs: the **Stream name** field with
+**Update**, the OBS follow checkbox, **Connect**, and the status line.
+Everything that is set once per station sits behind the **gear button** at the
+right of the Connect row, which opens **Radio.co Settings**:
+
 | Field | Notes |
 |---|---|
 | Protocol | `SHOUTcast v1 (legacy ICY)` for Radio.co; `Icecast (HTTP SOURCE)` for a normal Icecast server |
@@ -63,25 +68,28 @@ Open **View → Docks → Radio.co**.
 | Username | `source` (Icecast only; ignored by SHOUTcast v1) |
 | Mount | `/` (Icecast only; ignored by SHOUTcast v1) |
 | Password | The broadcast password from your dashboard. SHOUTcast v1 wants the short token; Icecast wants the long base64 blob |
-| Station | Sent as `ice-name` when connecting |
+| Station name | Sent as `ice-name` when connecting |
 | Bitrate | 64 – 320 kbps |
+
+That dialog has no OK: every field is saved the moment you change it, and
+**Close** only puts the window away.
 
 Press **Connect**. The status line shows `Idle`, `Connecting…`,
 `Reconnecting…`, `● Live hh:mm:ss`, or the server's error text. Settings
 persist across restarts, and auto-reconnect is on.
 
-**Now Playing** is a single free-text field. Type the whole line, press
-**Update**, and it reaches listeners in roughly 15–20 seconds without
-interrupting audio, appearing exactly as typed. There is deliberately no
-artist/title split: the server would rejoin the pair as `"artist - title"` and
-reformat what you wrote.
+**Stream name** is the now-playing line, a single free-text field. Type the
+whole line, press **Update**, and it reaches listeners in roughly 15–20 seconds
+without interrupting audio, appearing exactly as typed. There is deliberately
+no artist/title split: the server would rejoin the pair as `"artist - title"`
+and reformat what you wrote.
 
-**Station name** is editable at any time, but it travels in the connection
-handshake and cannot be changed on a live connection. Editing it while
-connected enables **Apply Name**, which reconnects to apply it — a brief
-dropout. When not connected it is simply picked up on the next Connect. If a
-dropout is unacceptable, change the name in the Radio.co dashboard instead;
-that is what listeners actually see.
+**Station name** (in the settings dialog) is editable at any time, but it
+travels in the connection handshake and cannot be changed on a live
+connection. Editing it while connected enables **Apply Name**, which reconnects
+to apply it — a brief dropout. When not connected it is simply picked up on the
+next Connect. If a dropout is unacceptable, change the name in the Radio.co
+dashboard instead; that is what listeners actually see.
 
 **Connect with OBS "Start Streaming"** (off by default) ties the audio feed to
 OBS's own stream button, so one click goes live on both the video platform and
