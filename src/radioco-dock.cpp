@@ -248,6 +248,8 @@ private:
 	QLineEdit *stationEdit = nullptr;
 	QPushButton *applyNameButton = nullptr;
 	QComboBox *bitrateBox = nullptr;
+	QSpinBox *reconnectRetriesSpin = nullptr;
+	QSpinBox *reconnectDelaySpin = nullptr;
 	QComboBox *trackBox = nullptr;
 	QLabel *trackInfoLabel = nullptr;
 	QLabel *silentWarnLabel = nullptr;
@@ -373,6 +375,22 @@ void RadioCoDock::buildSettingsDialog()
 		bitrateBox->addItem(QString::number(br), br);
 	bitrateBox->setCurrentIndex(2); /* 128 */
 	form->addRow(QStringLiteral("Bitrate"), bitrateBox);
+	reconnectRetriesSpin = new QSpinBox(settingsDialog);
+	reconnectRetriesSpin->setRange(0, 100);
+	reconnectRetriesSpin->setValue(20);
+	reconnectRetriesSpin->setSpecialValueText(QStringLiteral("Off"));
+	reconnectRetriesSpin->setToolTip(
+		QStringLiteral("Takes effect on the next connect"));
+	form->addRow(QStringLiteral("Reconnect attempts"),
+		     reconnectRetriesSpin);
+
+	reconnectDelaySpin = new QSpinBox(settingsDialog);
+	reconnectDelaySpin->setRange(1, 60);
+	reconnectDelaySpin->setValue(1);
+	reconnectDelaySpin->setSuffix(QStringLiteral(" s"));
+	reconnectDelaySpin->setToolTip(
+		QStringLiteral("Takes effect on the next connect"));
+	form->addRow(QStringLiteral("Reconnect delay"), reconnectDelaySpin);
 
 	trackBox = new QComboBox(settingsDialog);
 	trackBox->addItem(QStringLiteral("Same as OBS stream"), -1);
@@ -483,6 +501,10 @@ RadioCoDock::RadioCoDock(QWidget *parent) : QWidget(parent)
 	connect(bitrateBox, &QComboBox::currentIndexChanged, this,
 		&RadioCoDock::onFieldChanged);
 	connect(portSpin, &QSpinBox::valueChanged, this,
+		&RadioCoDock::onFieldChanged);
+	connect(reconnectRetriesSpin, &QSpinBox::valueChanged, this,
+		&RadioCoDock::onFieldChanged);
+	connect(reconnectDelaySpin, &QSpinBox::valueChanged, this,
 		&RadioCoDock::onFieldChanged);
 	connect(followObsBox, &QCheckBox::toggled, this,
 		&RadioCoDock::onFieldChanged);
@@ -600,8 +622,10 @@ void RadioCoDock::startOutput(bool asAutoStart)
 	signal_handler_connect(sh, "reconnect_success",
 			       handle_reconnect_success, this);
 
-	/* butt reconnected indefinitely; 20 attempts at 1 s matches it. */
-	obs_output_set_reconnect_settings(output, 20, 1);
+	/* Defaults match butt: 20 attempts at 1 s. */
+	obs_output_set_reconnect_settings(output,
+					  reconnectRetriesSpin->value(),
+					  reconnectDelaySpin->value());
 	obs_output_set_audio_encoder(output, encoder, 0);
 
 	autoStarted = asAutoStart;
@@ -986,6 +1010,8 @@ void RadioCoDock::loadSettings()
 	obs_data_set_default_string(s, "password", "");
 	obs_data_set_default_string(s, "station_name", "OBS Stream");
 	obs_data_set_default_int(s, "bitrate", 128);
+	obs_data_set_default_int(s, "reconnect_retries", 20);
+	obs_data_set_default_int(s, "reconnect_delay", 1);
 	obs_data_set_default_int(s, "mixer_index", -1);
 	obs_data_set_default_string(s, "song", "");
 	obs_data_set_default_bool(s, "follow_obs", false);
@@ -1008,6 +1034,10 @@ void RadioCoDock::loadSettings()
 	const int bitrate = (int)obs_data_get_int(s, "bitrate");
 	const int bitrateIdx = bitrateBox->findData(bitrate);
 	bitrateBox->setCurrentIndex(bitrateIdx >= 0 ? bitrateIdx : 2);
+	reconnectRetriesSpin->setValue(
+		(int)obs_data_get_int(s, "reconnect_retries"));
+	reconnectDelaySpin->setValue(
+		(int)obs_data_get_int(s, "reconnect_delay"));
 
 	/*
 	 * -1 means "Same as OBS stream". Anything else is a 0-based mixer
@@ -1054,6 +1084,9 @@ void RadioCoDock::saveSettings()
 	obs_data_set_string(s, "station_name",
 			    stationEdit->text().toUtf8().constData());
 	obs_data_set_int(s, "bitrate", bitrateBox->currentData().toInt());
+	obs_data_set_int(s, "reconnect_retries",
+			 reconnectRetriesSpin->value());
+	obs_data_set_int(s, "reconnect_delay", reconnectDelaySpin->value());
 	obs_data_set_int(s, "mixer_index", trackBox->currentData().toInt());
 	obs_data_set_string(s, "song",
 			    nowPlayingEdit->text().toUtf8().constData());
