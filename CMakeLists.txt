@@ -14,7 +14,7 @@ cmake_minimum_required(VERSION 3.16...3.26)
 set(CMAKE_OSX_DEPLOYMENT_TARGET "13.0" CACHE STRING "Minimum macOS version")
 set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "Build architectures")
 
-project(obs-icecast VERSION 1.0.0 LANGUAGES C CXX)
+project(obs-icecast VERSION 1.1.0 LANGUAGES C CXX)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)

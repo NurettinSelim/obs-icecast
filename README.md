@@ -35,7 +35,7 @@ the copies already inside `OBS.app`, which is why the OBS major matters.
 ```bash
 mkdir -p ~/Library/Application\ Support/obs-studio/plugins
 
-unzip -o ~/Downloads/obs-icecast-1.0.0-arm64.zip \
+unzip -o ~/Downloads/obs-icecast-1.1.0-arm64.zip \
       -d ~/Library/Application\ Support/obs-studio/plugins/
 
 xattr -dr com.apple.quarantine \
@@ -70,14 +70,16 @@ right of the Connect row, which opens **Radio.co Settings**:
 | Password | The broadcast password from your dashboard. SHOUTcast v1 wants the short token; Icecast wants the long base64 blob |
 | Station name | Sent as `ice-name` when connecting |
 | Bitrate | 64 – 320 kbps |
+| Reconnect attempts | Failed reconnects before stopping; **20** by default, or **Off** to disable |
+| Reconnect delay | Initial delay between attempts, **1 s** by default; changes take effect on the next connect |
 | Audio track | Which OBS audio track feeds the stream: **Same as OBS stream** (the default) or a fixed Track 1–6. See the **Audio track** notes below |
 
 That dialog has no OK: every field is saved the moment you change it, and
 **Close** only puts the window away.
 
-Press **Connect**. The status line shows `Idle`, `Connecting…`,
+Press **Connect**. The color-coded status line shows `Idle`, `Connecting…`,
 `Reconnecting…`, `● Live hh:mm:ss`, or the server's error text. Settings
-persist across restarts, and auto-reconnect is on.
+persist across restarts; auto-reconnect defaults to 20 attempts at 1 s.
 
 **Stream name** is the now-playing line, a single free-text field. Type the
 whole line, press **Update**, and it reaches listeners in roughly 15–20 seconds
@@ -208,7 +210,7 @@ codesign --force --sign - --identifier io.github.nurettinselim.obs-icecast \
          --timestamp=none build/obs-icecast.plugin
 
 ditto -c -k --keepParent build/obs-icecast.plugin \
-      obs-icecast-1.0.0-arm64.zip
+      obs-icecast-1.1.0-arm64.zip
 ```
 
 `simde` is needed because `libobs`'s SSE-intrinsics header pulls in
@@ -267,6 +269,9 @@ integration.
 [`docs/FINDINGS.md`](docs/FINDINGS.md) — the wire protocol byte for byte, what
 was measured against the live endpoint, the approaches that do **not** work and
 why, the build/ABI constraints, and the verification log.
+
+[`docs/RELEASING.md`](docs/RELEASING.md) — the maintainer release procedure
+for building, verifying, packaging, signing, and publishing a release.
 
 ---
 
