@@ -169,17 +169,10 @@ Connecting on an empty track is allowed, not blocked: sources can be added
 after you go live. The OBS log records the full breakdown at connect time:
 
 ```
-<<<<<<< HEAD
-[obs-icecast] streaming OBS audio track 2
-[obs-icecast] track 2: 'Mic/Aux' not on this track
-[obs-icecast] track 2: 'macOS Screen Capture' -> on air
-[obs-icecast] track 2: 'macOS Screen Capture 2' not in the active scene
-=======
 [obs-icecast] streaming OBS audio track 2 (same as OBS stream)
 [obs-icecast] track 2: 'Mic/Aux' not on this track
 [obs-icecast] track 2: 'macOS Screen Capture' -> on air
 [obs-icecast] track 2: 'macOS Screen Capture 2' not in the active scene
->>>>>>> e745ed2 (Follow OBS's own stream track by default)
 ```
 
 **Connect with OBS "Start Streaming"** (off by default) ties the audio feed to
