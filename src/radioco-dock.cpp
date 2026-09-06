@@ -232,6 +232,8 @@ private:
 	void buildSettingsDialog();
 	void loadSettings();
 	void saveSettings();
+	enum class StatusKind { Idle, Busy, Live, Error };
+	void setStatus(const QString &text, StatusKind kind);
 	void refreshControls();
 	void updateTrackStatus();
 	int selectedMixerIndex() const;
@@ -544,7 +546,8 @@ void RadioCoDock::startOutput(bool asAutoStart)
 		return;
 
 	if (serverEdit->text().trimmed().isEmpty()) {
-		statusLabel->setText(QStringLiteral("Set a server address"));
+		setStatus(QStringLiteral("Set a server address"),
+			  StatusKind::Error);
 		return;
 	}
 
@@ -559,8 +562,8 @@ void RadioCoDock::startOutput(bool asAutoStart)
 	obs_data_release(es);
 
 	if (!encoder) {
-		statusLabel->setText(
-			QStringLiteral("Failed to create MP3 encoder"));
+		setStatus(QStringLiteral("Failed to create MP3 encoder"),
+			  StatusKind::Error);
 		return;
 	}
 	obs_encoder_set_audio(encoder, obs_get_audio());
@@ -584,8 +587,8 @@ void RadioCoDock::startOutput(bool asAutoStart)
 	obs_data_release(os);
 
 	if (!output) {
-		statusLabel->setText(
-			QStringLiteral("Failed to create output"));
+		setStatus(QStringLiteral("Failed to create output"),
+			  StatusKind::Error);
 		releaseOutput();
 		return;
 	}
@@ -603,13 +606,13 @@ void RadioCoDock::startOutput(bool asAutoStart)
 
 	autoStarted = asAutoStart;
 	connectedName = stationEdit->text();
-	statusLabel->setText(QStringLiteral("Connecting…"));
+	setStatus(QStringLiteral("Connecting…"), StatusKind::Busy);
 
 	if (!obs_output_start(output)) {
 		const char *err = obs_output_get_last_error(output);
-		statusLabel->setText(err && *err
-					     ? QString::fromUtf8(err)
-					     : QStringLiteral("Failed to start"));
+		setStatus(err && *err ? QString::fromUtf8(err)
+				      : QStringLiteral("Failed to start"),
+			  StatusKind::Error);
 		releaseOutput();
 	}
 
@@ -621,7 +624,7 @@ void RadioCoDock::stopOutput()
 	if (!output)
 		return;
 	obs_output_stop(output);
-	statusLabel->setText(QStringLiteral("Disconnecting…"));
+	setStatus(QStringLiteral("Disconnecting…"), StatusKind::Busy);
 }
 
 /*
@@ -702,7 +705,7 @@ void RadioCoDock::onApplyNameClicked()
 	pendingRestart = true;
 	applyNameButton->setEnabled(false);
 	stopOutput();
-	statusLabel->setText(QStringLiteral("Applying name…"));
+	setStatus(QStringLiteral("Applying name…"), StatusKind::Busy);
 }
 
 void RadioCoDock::onFieldChanged()
@@ -729,8 +732,8 @@ void RadioCoDock::onTrackChanged()
 	if (output) {
 		pendingRestart = true;
 		stopOutput();
-		statusLabel->setText(
-			QStringLiteral("Switching audio track\u2026"));
+		setStatus(QStringLiteral("Switching audio track\u2026"),
+			  StatusKind::Busy);
 	}
 
 	refreshControls();
@@ -756,11 +759,12 @@ void RadioCoDock::onTick()
 		const qint64 secs = liveTimer.isValid()
 					    ? liveTimer.elapsed() / 1000
 					    : 0;
-		statusLabel->setText(
+		setStatus(
 			QStringLiteral("● Live %1:%2:%3")
 				.arg(secs / 3600, 2, 10, QLatin1Char('0'))
 				.arg((secs / 60) % 60, 2, 10, QLatin1Char('0'))
-				.arg(secs % 60, 2, 10, QLatin1Char('0')));
+				.arg(secs % 60, 2, 10, QLatin1Char('0')),
+			StatusKind::Live);
 	}
 
 	/*
@@ -777,8 +781,8 @@ void RadioCoDock::onTick()
 		     activeMixerIndex + 1, selectedMixerIndex() + 1);
 		pendingRestart = true;
 		stopOutput();
-		statusLabel->setText(
-			QStringLiteral("Following OBS stream track\u2026"));
+		setStatus(QStringLiteral("Following OBS stream track\u2026"),
+			  StatusKind::Busy);
 		return;
 	}
 	updateTrackStatus();
@@ -791,7 +795,7 @@ void RadioCoDock::onOutputStarted()
 {
 	liveTimer.start();
 	connectedName = stationEdit->text();
-	statusLabel->setText(QStringLiteral("● Live 00:00:00"));
+	setStatus(QStringLiteral("● Live 00:00:00"), StatusKind::Live);
 	refreshControls();
 }
 
@@ -804,12 +808,12 @@ void RadioCoDock::onOutputStopped(int code)
 	liveTimer.invalidate();
 
 	if (err && *err)
-		statusLabel->setText(QString::fromUtf8(err));
+		setStatus(QString::fromUtf8(err), StatusKind::Error);
 	else if (code != OBS_OUTPUT_SUCCESS)
-		statusLabel->setText(
-			QStringLiteral("Disconnected (code %1)").arg(code));
+		setStatus(QStringLiteral("Disconnected (code %1)").arg(code),
+			  StatusKind::Error);
 	else
-		statusLabel->setText(QStringLiteral("Idle"));
+		setStatus(QStringLiteral("Idle"), StatusKind::Idle);
 
 	if (pendingRestart && !shuttingDown) {
 		pendingRestart = false;
@@ -822,16 +826,36 @@ void RadioCoDock::onOutputStopped(int code)
 
 void RadioCoDock::onOutputReconnecting()
 {
-	statusLabel->setText(QStringLiteral("Reconnecting…"));
+	setStatus(QStringLiteral("Reconnecting…"), StatusKind::Busy);
 }
 
 void RadioCoDock::onOutputReconnected()
 {
 	liveTimer.start();
-	statusLabel->setText(QStringLiteral("● Live 00:00:00"));
+	setStatus(QStringLiteral("● Live 00:00:00"), StatusKind::Live);
 }
 
 /* ------------------------------------------------------------------ */
+
+void RadioCoDock::setStatus(const QString &text, StatusKind kind)
+{
+	statusLabel->setText(text);
+
+	switch (kind) {
+	case StatusKind::Idle:
+		statusLabel->setStyleSheet(QString());
+		break;
+	case StatusKind::Busy:
+		statusLabel->setStyleSheet(QStringLiteral("color: #e6a817;"));
+		break;
+	case StatusKind::Live:
+		statusLabel->setStyleSheet(QStringLiteral("color: #27ae60;"));
+		break;
+	case StatusKind::Error:
+		statusLabel->setStyleSheet(QStringLiteral("color: #e05a4e;"));
+		break;
+	}
+}
 
 void RadioCoDock::refreshControls()
 {
