@@ -35,7 +35,7 @@ the copies already inside `OBS.app`, which is why the OBS major matters.
 ```bash
 mkdir -p ~/Library/Application\ Support/obs-studio/plugins
 
-unzip -o ~/Downloads/obs-icecast-1.1.0-arm64.zip \
+unzip -o ~/Downloads/obs-icecast-1.2.0-arm64.zip \
       -d ~/Library/Application\ Support/obs-studio/plugins/
 
 xattr -dr com.apple.quarantine \
@@ -197,6 +197,29 @@ it is not an audio-only one.
 
 ---
 
+## Hotkeys
+
+**Settings → Hotkeys** lists **Radio.co: Connect** and **Radio.co: Disconnect**
+(since 1.2.0), so a Stream Deck "Hotkey" button or a keyboard shortcut can
+start and stop the broadcast without the dock.
+
+- They are two keys, not a toggle. Pressing Connect while connected, or
+  Disconnect while idle, does nothing, so a second press from someone unsure
+  whether the first one landed cannot take the station off air.
+- A hotkey connect counts as manual, exactly like the Connect button: with
+  "Connect with OBS Start Streaming" ticked, stopping the video stream still
+  leaves it on air.
+- OBS persists only its own frontend hotkeys (in the profile's `basic.ini`),
+  so these bindings live in this plugin's `settings.json` as
+  `hotkey_connect` / `hotkey_disconnect`, in libobs's binding format, for
+  example `[{"key": "OBS_KEY_1", "control": true, "alt": true, "command": true,
+  "shift": true}]`. They are written on OBS exit and on every dock change, so a
+  binding set in Settings → Hotkeys is lost if OBS crashes before either.
+- Every press is logged: `[obs-icecast] hotkey: connect (connecting)`, and at
+  startup `[obs-icecast] hotkeys loaded: connect 1, disconnect 1 binding(s)`.
+
+---
+
 ## Build from source
 
 ```bash
@@ -210,7 +233,7 @@ codesign --force --sign - --identifier io.github.nurettinselim.obs-icecast \
          --timestamp=none build/obs-icecast.plugin
 
 ditto -c -k --keepParent build/obs-icecast.plugin \
-      obs-icecast-1.1.0-arm64.zip
+      obs-icecast-1.2.0-arm64.zip
 ```
 
 `simde` is needed because `libobs`'s SSE-intrinsics header pulls in
@@ -240,7 +263,7 @@ keeps using the old ones.
 | SHOUTcast v1 never completes the handshake | You are on the admin port. SHOUTcast v1 sources connect on **port + 1**; the plugin applies this automatically, so enter the base port (e.g. `4192`), not `4193`. |
 | Connects and shows `● Live`, but the station stays `automated` | The stream is arriving but the station is not accepting it: "Live Anytime" is disabled, or no event is scheduled in the dashboard. butt reports the same condition at `src/shoutcast.cpp:189-191`. |
 | Metadata returns `200` but the title never changes | Titles only land while the source is actually live — which makes this a handy liveness check. Confirm `source.type` is `live` first. |
-| Build fails with `FFmpeg major mismatch` | Homebrew's FFmpeg major differs from the one in `OBS.app`. Install the matching formula, or upgrade OBS. |
+| Build fails with `FFmpeg major mismatch` | Homebrew's FFmpeg major differs from the one in `OBS.app`. Install the matching keg-only formula (OBS 32.2.x needs libavcodec 62 = `ffmpeg@8`), then reconfigure with `PKG_CONFIG_PATH=$(brew --prefix ffmpeg@8)/lib/pkgconfig cmake -S . -B build -U 'LIBAV*' -U 'pkgcfg_lib_*'`. If `brew install` dies on a lock it holds itself, unpack the bottle from `brew fetch ffmpeg@8` instead and point `PKG_CONFIG_PATH` at it after replacing the `@@HOMEBREW_…@@` placeholders in its `.pc` files — only headers are used. |
 | Build fails with `simde headers not found` | `brew install simde`. |
 
 Live station status, useful for all of the above:

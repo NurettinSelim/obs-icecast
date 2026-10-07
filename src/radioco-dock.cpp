@@ -215,6 +215,8 @@ public slots:
 	void onOutputStopped(int code);
 	void onOutputReconnecting();
 	void onOutputReconnected();
+	void onHotkeyConnect();
+	void onHotkeyDisconnect();
 
 private slots:
 	void onConnectClicked();
@@ -264,6 +266,9 @@ private:
 
 	obs_output_t *output = nullptr;
 	obs_encoder_t *encoder = nullptr;
+
+	obs_hotkey_id connectHotkey = OBS_INVALID_HOTKEY_ID;
+	obs_hotkey_id disconnectHotkey = OBS_INVALID_HOTKEY_ID;
 
 	QElapsedTimer liveTimer;
 	QString connectedName;
@@ -315,6 +320,34 @@ static void handle_reconnect_success(void *data, calldata_t *cd)
 	UNUSED_PARAMETER(cd);
 	QMetaObject::invokeMethod(static_cast<RadioCoDock *>(data),
 				  "onOutputReconnected", Qt::QueuedConnection);
+}
+
+/*
+ * Hotkey callbacks run on libobs's hotkey thread. Separate Connect and
+ * Disconnect keys rather than one toggle: a Stream Deck button pressed twice
+ * by someone unsure whether the first press landed must not take the
+ * broadcast off air.
+ */
+static void hotkey_connect(void *data, obs_hotkey_id id, obs_hotkey_t *key,
+			   bool pressed)
+{
+	UNUSED_PARAMETER(id);
+	UNUSED_PARAMETER(key);
+	if (pressed)
+		QMetaObject::invokeMethod(static_cast<RadioCoDock *>(data),
+					  "onHotkeyConnect",
+					  Qt::QueuedConnection);
+}
+
+static void hotkey_disconnect(void *data, obs_hotkey_id id, obs_hotkey_t *key,
+			      bool pressed)
+{
+	UNUSED_PARAMETER(id);
+	UNUSED_PARAMETER(key);
+	if (pressed)
+		QMetaObject::invokeMethod(static_cast<RadioCoDock *>(data),
+					  "onHotkeyDisconnect",
+					  Qt::QueuedConnection);
 }
 
 /* ------------------------------------------------------------------ */
@@ -518,6 +551,14 @@ RadioCoDock::RadioCoDock(QWidget *parent) : QWidget(parent)
 	connect(trackBox, &QComboBox::currentIndexChanged, this,
 		&RadioCoDock::onTrackChanged);
 
+	/* Registered before loadSettings, which restores their bindings. */
+	connectHotkey = obs_hotkey_register_frontend(
+		"obs_icecast.connect", "Radio.co: Connect", hotkey_connect,
+		this);
+	disconnectHotkey = obs_hotkey_register_frontend(
+		"obs_icecast.disconnect", "Radio.co: Disconnect",
+		hotkey_disconnect, this);
+
 	loadSettings();
 
 	tickTimer = new QTimer(this);
@@ -534,6 +575,10 @@ RadioCoDock::~RadioCoDock()
 	if (tickTimer)
 		tickTimer->stop();
 	releaseOutput();
+	if (connectHotkey != OBS_INVALID_HOTKEY_ID)
+		obs_hotkey_unregister(connectHotkey);
+	if (disconnectHotkey != OBS_INVALID_HOTKEY_ID)
+		obs_hotkey_unregister(disconnectHotkey);
 }
 
 /* ------------------------------------------------------------------ */
@@ -699,6 +744,29 @@ void RadioCoDock::onConnectClicked()
 		stopOutput();
 	else
 		startOutput(false);
+}
+
+/*
+ * A hotkey start counts as manual, like the Connect button: stopping the OBS
+ * stream later leaves it on air even when "Connect with OBS Start Streaming"
+ * is ticked.
+ */
+void RadioCoDock::onHotkeyConnect()
+{
+	blog(LOG_INFO, "[obs-icecast] hotkey: connect (%s)",
+	     output ? "already connected, ignored" : "connecting");
+	if (shuttingDown || output)
+		return;
+	startOutput(false);
+}
+
+void RadioCoDock::onHotkeyDisconnect()
+{
+	blog(LOG_INFO, "[obs-icecast] hotkey: disconnect (%s)",
+	     output ? "disconnecting" : "not connected, ignored");
+	if (shuttingDown || !output)
+		return;
+	stopOutput();
 }
 
 void RadioCoDock::onUpdateClicked()
@@ -1053,6 +1121,24 @@ void RadioCoDock::loadSettings()
 		QString::fromUtf8(obs_data_get_string(s, "song")));
 	followObsBox->setChecked(obs_data_get_bool(s, "follow_obs"));
 
+	/*
+	 * OBS persists only its own frontend hotkeys (in the profile), so a
+	 * plugin's bindings travel in its own settings file. A missing array
+	 * loads as no bindings.
+	 */
+	obs_data_array_t *keys = obs_data_get_array(s, "hotkey_connect");
+	obs_hotkey_load(connectHotkey, keys);
+	const size_t nConnect = obs_data_array_count(keys);
+	obs_data_array_release(keys);
+	keys = obs_data_get_array(s, "hotkey_disconnect");
+	obs_hotkey_load(disconnectHotkey, keys);
+	const size_t nDisconnect = obs_data_array_count(keys);
+	obs_data_array_release(keys);
+	blog(LOG_INFO,
+	     "[obs-icecast] hotkeys loaded: connect %zu, disconnect %zu "
+	     "binding(s)",
+	     nConnect, nDisconnect);
+
 	obs_data_release(s);
 	loading = false;
 }
@@ -1091,6 +1177,13 @@ void RadioCoDock::saveSettings()
 	obs_data_set_string(s, "song",
 			    nowPlayingEdit->text().toUtf8().constData());
 	obs_data_set_bool(s, "follow_obs", followObsBox->isChecked());
+
+	obs_data_array_t *keys = obs_hotkey_save(connectHotkey);
+	obs_data_set_array(s, "hotkey_connect", keys);
+	obs_data_array_release(keys);
+	keys = obs_hotkey_save(disconnectHotkey);
+	obs_data_set_array(s, "hotkey_disconnect", keys);
+	obs_data_array_release(keys);
 
 	obs_data_save_json_safe(s, path, "tmp", "bak");
 
