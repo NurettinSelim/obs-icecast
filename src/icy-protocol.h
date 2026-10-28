@@ -56,7 +56,9 @@ int icy_connect(const struct icy_params *params, char *error_buf,
  * Push a now-playing line. The string is sent verbatim as the whole title.
  * Opens and closes its own short-lived connection, so it is safe to call
  * from a background thread while audio is streaming.
- * Returns 0 on success, -1 on failure.
+ * Returns 0 on success; -1 when the server could not be reached or gave no
+ * usable answer (or answered 5xx), so a retry may succeed; -2 when the
+ * request itself was refused or could not be built, so it will not.
  */
 int icy_update_metadata(const struct icy_params *params, const char *song,
 			char *error_buf, size_t error_len);

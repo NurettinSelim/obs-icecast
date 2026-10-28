@@ -2,7 +2,8 @@
 
 An OBS Studio plugin that streams **audio-only MP3** to Icecast / Liquidsoap
 and SHOUTcast v1 servers, with a native **Radio.co** dock for connecting,
-updating the now-playing line, and setting the station name.
+updating the now-playing line, and setting the station name. The same
+now-playing line can also set the **Kick** stream title.
 
 OBS cannot do this on its own: its Custom Output (FFmpeg) creates a video
 stream whenever the container has a default video codec — and the `mp3`
@@ -35,7 +36,7 @@ the copies already inside `OBS.app`, which is why the OBS major matters.
 ```bash
 mkdir -p ~/Library/Application\ Support/obs-studio/plugins
 
-unzip -o ~/Downloads/obs-icecast-1.2.0-arm64.zip \
+unzip -o ~/Downloads/obs-icecast-1.3.0-arm64.zip \
       -d ~/Library/Application\ Support/obs-studio/plugins/
 
 xattr -dr com.apple.quarantine \
@@ -56,7 +57,8 @@ is almost always this.
 Open **View → Docks → Radio.co**.
 
 The dock carries only what a broadcast needs: the **Stream name** field with
-**Update**, the OBS follow checkbox, **Connect**, and the status line.
+**Update**, the **Also set the Kick title** checkbox (once Kick is connected),
+the title line, the OBS follow checkbox, **Connect**, and the status line.
 Everything that is set once per station sits behind the **gear button** at the
 right of the Connect row, which opens **Radio.co Settings**:
 
@@ -73,6 +75,7 @@ right of the Connect row, which opens **Radio.co Settings**:
 | Reconnect attempts | Failed reconnects before stopping; **20** by default, or **Off** to disable |
 | Reconnect delay | Initial delay between attempts, **1 s** by default; changes take effect on the next connect |
 | Audio track | Which OBS audio track feeds the stream: **Same as OBS stream** (the default) or a fixed Track 1–6. See the **Audio track** notes below |
+| Kick title | Client ID, Client secret, the Redirect URL to register, and **Connect Kick**. See **Kick title** below |
 
 That dialog has no OK: every field is saved the moment you change it, and
 **Close** only puts the window away.
@@ -86,6 +89,20 @@ whole line, press **Update**, and it reaches listeners in roughly 15–20 second
 without interrupting audio, appearing exactly as typed. There is deliberately
 no artist/title split: the server would rejoin the pair as `"artist - title"`
 and reformat what you wrote.
+
+The field is also sent on its own **15 seconds after every connect and
+reconnect**, so typing the show name before going live is enough. Sooner
+would be lost: Radio.co accepts a title only once it has switched to the live
+source, and answers `200` to one sent before that without applying it. Every
+press of **Update** sends again, even an unchanged title.
+
+The **title line** under the field shows what happened to the last title on
+each destination — `radio.co ✓ 21:04 · Kick ✓ 21:04` — with the server's
+reason in its tooltip and in the OBS log. A title that gets no answer
+(network down, server error) is retried after 5, 10 and 20 seconds, then shown
+in red as `✗ not set`; one the server refuses outright is shown at once. A
+newer title replaces one still waiting to be retried. Audio is never affected:
+titles travel on their own short-lived connections and threads.
 
 **Station name** (in the settings dialog) is editable at any time, but it
 travels in the connection handshake and cannot be changed on a live
@@ -220,6 +237,54 @@ start and stop the broadcast without the dock.
 
 ---
 
+## Kick title
+
+With a Kick account connected, **Update** sends the stream name to Kick as
+the stream title as well, and it is sent once more whenever OBS **Start
+Streaming** begins (Kick accepts a title live or offline). Untick **Also set
+the Kick title** to send a line to the radio only.
+
+Kick only lets a channel's own OAuth app change its title, so the setup is a
+one-time job per station:
+
+1. On kick.com, signed in as the channel, turn on two-factor authentication,
+   then open **Settings → Developer** and create an app. Set its Redirect URL
+   to exactly `http://localhost:51934/callback` and, if asked for scopes, allow
+   `channel:read` and `channel:write`.
+2. In OBS, open the dock's gear → **Kick title**. Paste the **Client ID**, then
+   the **Client secret**. The secret is saved to the macOS keychain the moment
+   you leave the field and the field is cleared; it never touches
+   `settings.json`.
+3. Press **Connect Kick**. The browser opens Kick's consent page; sign in as
+   the channel and allow access. The browser tab says it can be closed and the
+   dialog shows `Connected: <channel>` — check that it names the station's
+   channel and not a personal account the browser was signed in to.
+
+The sign-in has to happen on the machine that runs OBS: Kick sends the
+browser back to `localhost:51934`, where the plugin is waiting for five
+minutes.
+
+After that it maintains itself. The access token is refreshed when it
+expires, and the new refresh token Kick issues each time is written back to
+the keychain. If Kick stops accepting the refresh token (revoked, or unused
+for too long) the title line shows `Kick ✗ sign in again (gear)`: press
+**Connect Kick** again. **Disconnect** removes the stored tokens; the client
+secret stays.
+
+Each title is read back from Kick after it is set, so the log shows what
+viewers see:
+
+```
+[obs-icecast] kick: title set: Kahve & Sohbet
+[obs-icecast] kick: radyozu now shows: Kahve & Sohbet
+```
+
+Offline, Kick's API reports no title at all, but it keeps the one that was
+set and uses it for the next stream (the creator dashboard shows it). The log
+then says `radyozu is offline; the title is kept for the next stream`.
+
+---
+
 ## Build from source
 
 ```bash
@@ -233,7 +298,7 @@ codesign --force --sign - --identifier io.github.nurettinselim.obs-icecast \
          --timestamp=none build/obs-icecast.plugin
 
 ditto -c -k --keepParent build/obs-icecast.plugin \
-      obs-icecast-1.2.0-arm64.zip
+      obs-icecast-1.3.0-arm64.zip
 ```
 
 `simde` is needed because `libobs`'s SSE-intrinsics header pulls in
@@ -243,7 +308,9 @@ release tarball does not contain.
 Homebrew provides headers and `moc` only — Qt, FFmpeg, libobs and the frontend
 API are all linked out of `OBS.app` through `@rpath`, so nothing is vendored
 and no Homebrew paths end up in the bundle. `otool -L` on the result should
-show only `@rpath/…`, `/usr/lib/libc++.1.dylib` and `/usr/lib/libSystem.B.dylib`.
+show only `@rpath/…`, macOS's own `/usr/lib/libcurl.4.dylib` (the same one
+`OBS.app` links), the `Security` and `CoreFoundation` frameworks,
+`/usr/lib/libc++.1.dylib` and `/usr/lib/libSystem.B.dylib`.
 
 **Delete `build/` whenever the target OBS version changes.** The OBS headers
 are fetched once and cached under `build/_deps`, so an incremental reconfigure
@@ -263,6 +330,11 @@ keeps using the old ones.
 | SHOUTcast v1 never completes the handshake | You are on the admin port. SHOUTcast v1 sources connect on **port + 1**; the plugin applies this automatically, so enter the base port (e.g. `4192`), not `4193`. |
 | Connects and shows `● Live`, but the station stays `automated` | The stream is arriving but the station is not accepting it: "Live Anytime" is disabled, or no event is scheduled in the dashboard. butt reports the same condition at `src/shoutcast.cpp:189-191`. |
 | Metadata returns `200` but the title never changes | Titles only land while the source is actually live — which makes this a handy liveness check. Confirm `source.type` is `live` first. |
+| `radio.co ✗ not set` on the title line | Four attempts got no answer or a server error. The tooltip and the log (`[obs-icecast] radio.co title failed: …`) give the reason; press **Update** once the network is back. |
+| `Kick ✗ sign in again (gear)` | Kick no longer accepts the stored sign-in. Gear → **Connect Kick**, sign in as the channel. |
+| **Connect Kick** says `Port 51934 is busy` | Another program holds the redirect port. Quit it and retry; the port is fixed because the Kick app's Redirect URL names it. |
+| `Kick refused the sign-in (HTTP 401: …)` | Wrong client secret, or the Kick app's Redirect URL is not exactly `http://localhost:51934/callback`. Re-enter the secret and press **Connect Kick** again. |
+| `Kick ✗ not set` with `HTTP 400` | Kick rejected the title itself; the log has Kick's message. |
 | Build fails with `FFmpeg major mismatch` | Homebrew's FFmpeg major differs from the one in `OBS.app`. Install the matching keg-only formula (OBS 32.2.x needs libavcodec 62 = `ffmpeg@8`), then reconfigure with `PKG_CONFIG_PATH=$(brew --prefix ffmpeg@8)/lib/pkgconfig cmake -S . -B build -U 'LIBAV*' -U 'pkgcfg_lib_*'`. If `brew install` dies on a lock it holds itself, unpack the bottle from `brew fetch ffmpeg@8` instead and point `PKG_CONFIG_PATH` at it after replacing the `@@HOMEBREW_…@@` placeholders in its `.pc` files — only headers are used. |
 | Build fails with `simde headers not found` | `brew install simde`. |
 
@@ -281,9 +353,21 @@ curl -s https://public.radio.co/stations/<station-id>/status \
 ~/Library/Application Support/obs-studio/plugin_config/obs-icecast/settings.json
 ```
 
-Dock settings are written here on every change. **The password is stored in
-plaintext** — the same exposure butt had in `~/.buttrc`. There is no keychain
-integration.
+Dock settings are written here on every change. **The Radio.co password is
+stored in plaintext** — the same exposure butt had in `~/.buttrc`. The Kick
+client ID and the connected channel's name are stored here too; neither is
+secret.
+
+The Kick client secret and OAuth tokens are **not** in that file. They are
+generic passwords in the login keychain under the service
+`io.github.nurettinselim.obs-icecast.kick` (accounts `client_secret` and
+`tokens`), readable by OBS without a prompt and by any other app only with
+permission. To remove them by hand:
+
+```bash
+security delete-generic-password -s io.github.nurettinselim.obs-icecast.kick -a tokens
+security delete-generic-password -s io.github.nurettinselim.obs-icecast.kick -a client_secret
+```
 
 ---
 

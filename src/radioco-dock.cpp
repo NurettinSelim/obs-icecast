@@ -19,6 +19,8 @@
  */
 
 #include "radioco-dock.h"
+#include "title-sync.h"
+#include "kick-api.h"
 
 #include <obs.h>
 #include <obs-module.h>
@@ -39,6 +41,10 @@
 #include <QStringList>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QGroupBox>
+#include <QDesktopServices>
+#include <QUrl>
+#include <QTime>
 #include <QTimer>
 #include <QElapsedTimer>
 #include <QMetaObject>
@@ -51,6 +57,18 @@
 
 #define DOCK_ID "radioco_dock"
 #define DOCK_TITLE "Radio.co"
+
+/* Status colors, shared by the connection line and the title line. */
+#define COLOR_BUSY "#e6a817"
+#define COLOR_LIVE "#27ae60"
+#define COLOR_ERROR "#e05a4e"
+
+/*
+ * radio.co accepts a title only once the station has switched to the live
+ * source; sent the instant the handshake completes, it returns 200 and is
+ * silently dropped. 15 s is comfortably past that switch.
+ */
+#define RADIO_TITLE_DELAY_MS 15000
 
 /* ------------------------------------------------------------------ */
 
@@ -217,6 +235,9 @@ public slots:
 	void onOutputReconnected();
 	void onHotkeyConnect();
 	void onHotkeyDisconnect();
+	void onTitleStatus(int dest, int state, int attempt,
+			   const QString &detail);
+	void onKickConnectFinished(bool ok, const QString &text);
 
 private slots:
 	void onConnectClicked();
@@ -226,6 +247,9 @@ private slots:
 	void onFieldChanged();
 	void onSettingsClicked();
 	void onTrackChanged();
+	void onKickConnectClicked();
+	void onKickDisconnectClicked();
+	void onKickSecretEntered();
 
 private:
 	void startOutput(bool asAutoStart);
@@ -235,7 +259,14 @@ private:
 	void loadSettings();
 	void saveSettings();
 	enum class StatusKind { Idle, Busy, Live, Error };
+	static QString styleFor(StatusKind kind);
 	void setStatus(const QString &text, StatusKind kind);
+	void setKickAccount(const QString &text, StatusKind kind);
+	bool kickEnabled() const;
+	void sendRadioTitle(const char *why);
+	void scheduleRadioTitle();
+	void renderTitleStatus();
+	RadioTarget currentTarget() const;
 	void refreshControls();
 	void updateTrackStatus();
 	int selectedMixerIndex() const;
@@ -260,12 +291,33 @@ private:
 	QCheckBox *followObsBox = nullptr;
 	QPushButton *connectButton = nullptr;
 	QLabel *statusLabel = nullptr;
+	QCheckBox *kickTitleBox = nullptr;
+	QLabel *titleStatusLabel = nullptr;
+	QLineEdit *kickClientIdEdit = nullptr;
+	QLineEdit *kickSecretEdit = nullptr;
+	QPushButton *kickConnectButton = nullptr;
+	QPushButton *kickDisconnectButton = nullptr;
+	QLabel *kickAccountLabel = nullptr;
 	QDialog *settingsDialog = nullptr;
 	QPushButton *settingsButton = nullptr;
 	QTimer *tickTimer = nullptr;
 
 	obs_output_t *output = nullptr;
 	obs_encoder_t *encoder = nullptr;
+
+	TitleSync *titles = nullptr;
+	RadioTarget liveTarget;  /* the endpoint the live output connected to */
+	int connectGeneration = 0; /* invalidates pending title timers */
+	QString kickChannel;       /* slug of the signed-in Kick account */
+
+	/* Last outcome per destination, for the title line. */
+	struct TitleOutcome {
+		int state = -1; /* a TitleState, -1 before the first send */
+		int attempt = 0;
+		QString detail;
+		QTime at;
+	};
+	TitleOutcome radioOutcome, kickOutcome;
 
 	obs_hotkey_id connectHotkey = OBS_INVALID_HOTKEY_ID;
 	obs_hotkey_id disconnectHotkey = OBS_INVALID_HOTKEY_ID;
@@ -443,6 +495,53 @@ void RadioCoDock::buildSettingsDialog()
 	layout->addLayout(form);
 
 	/*
+	 * Kick's title is set through its API with a user token, which needs a
+	 * Kick developer app of the station's own (kick.com/settings/developer).
+	 * The client ID is public and saved with the other settings; the secret
+	 * goes straight to the keychain and is never shown again.
+	 */
+	auto *kickGroup = new QGroupBox(QStringLiteral("Kick title"),
+					settingsDialog);
+	auto *kickForm = new QFormLayout(kickGroup);
+	kickForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+
+	kickClientIdEdit = new QLineEdit(kickGroup);
+	kickForm->addRow(QStringLiteral("Client ID"), kickClientIdEdit);
+
+	kickSecretEdit = new QLineEdit(kickGroup);
+	kickSecretEdit->setEchoMode(QLineEdit::Password);
+	kickSecretEdit->setToolTip(QStringLiteral(
+		"Saved in the macOS keychain when you leave the field, then "
+		"cleared from this window"));
+	kickForm->addRow(QStringLiteral("Client secret"), kickSecretEdit);
+
+	auto *redirectEdit = new QLineEdit(
+		QStringLiteral(KICK_REDIRECT_URI), kickGroup);
+	redirectEdit->setReadOnly(true);
+	redirectEdit->setToolTip(QStringLiteral(
+		"Enter exactly this as the Redirect URL of your Kick app"));
+	kickForm->addRow(QStringLiteral("Redirect URL"), redirectEdit);
+
+	kickConnectButton =
+		new QPushButton(QStringLiteral("Connect Kick"), kickGroup);
+	kickConnectButton->setToolTip(QStringLiteral(
+		"Opens Kick in your browser. Sign in as the channel whose "
+		"title should change."));
+	kickDisconnectButton =
+		new QPushButton(QStringLiteral("Disconnect"), kickGroup);
+	kickAccountLabel = new QLabel(kickGroup);
+	kickAccountLabel->setWordWrap(true);
+	kickAccountLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+	auto *kickRow = new QHBoxLayout();
+	kickRow->setContentsMargins(0, 0, 0, 0);
+	kickRow->addWidget(kickConnectButton);
+	kickRow->addWidget(kickDisconnectButton);
+	kickRow->addWidget(kickAccountLabel, 1);
+	kickForm->addRow(QString(), kickRow);
+
+	layout->addWidget(kickGroup);
+
+	/*
 	 * Close, not OK/Cancel: every field persists as it changes through
 	 * onFieldChanged(), so there is nothing to commit or roll back.
 	 */
@@ -469,6 +568,8 @@ RadioCoDock::RadioCoDock(QWidget *parent) : QWidget(parent)
 {
 	setObjectName(DOCK_ID);
 
+	titles = new TitleSync(this);
+
 	buildSettingsDialog();
 
 	auto *root = new QVBoxLayout(this);
@@ -487,6 +588,21 @@ RadioCoDock::RadioCoDock(QWidget *parent) : QWidget(parent)
 	form->addRow(QStringLiteral("Stream name"), songRow);
 
 	root->addLayout(form);
+
+	/* Hidden until a Kick account is connected in the settings dialog. */
+	kickTitleBox = new QCheckBox(QStringLiteral("Also set the Kick title"),
+				     this);
+	kickTitleBox->setChecked(true);
+	kickTitleBox->setToolTip(QStringLiteral(
+		"Update sends the stream name to Kick too, and it is sent "
+		"when OBS starts streaming."));
+	root->addWidget(kickTitleBox);
+
+	titleStatusLabel = new QLabel(this);
+	titleStatusLabel->setTextFormat(Qt::RichText);
+	titleStatusLabel->setWordWrap(true);
+	titleStatusLabel->setVisible(false);
+	root->addWidget(titleStatusLabel);
 
 	followObsBox = new QCheckBox(
 		QStringLiteral("Connect with OBS \"Start Streaming\""), this);
@@ -527,6 +643,16 @@ RadioCoDock::RadioCoDock(QWidget *parent) : QWidget(parent)
 		&RadioCoDock::onApplyNameClicked);
 	connect(settingsButton, &QPushButton::clicked, this,
 		&RadioCoDock::onSettingsClicked);
+	connect(kickConnectButton, &QPushButton::clicked, this,
+		&RadioCoDock::onKickConnectClicked);
+	connect(kickDisconnectButton, &QPushButton::clicked, this,
+		&RadioCoDock::onKickDisconnectClicked);
+	connect(kickSecretEdit, &QLineEdit::editingFinished, this,
+		&RadioCoDock::onKickSecretEntered);
+	connect(titles, &TitleSync::titleStatus, this,
+		&RadioCoDock::onTitleStatus);
+	connect(titles, &TitleSync::kickConnectFinished, this,
+		&RadioCoDock::onKickConnectFinished);
 
 	/* Persist on every change, and keep the buttons in step. */
 	connect(protocolBox, &QComboBox::currentIndexChanged, this,
@@ -541,8 +667,16 @@ RadioCoDock::RadioCoDock(QWidget *parent) : QWidget(parent)
 		&RadioCoDock::onFieldChanged);
 	connect(followObsBox, &QCheckBox::toggled, this,
 		&RadioCoDock::onFieldChanged);
+	connect(kickTitleBox, &QCheckBox::toggled, this,
+		&RadioCoDock::onFieldChanged);
+	connect(kickTitleBox, &QCheckBox::toggled, this,
+		&RadioCoDock::renderTitleStatus);
+	connect(kickClientIdEdit, &QLineEdit::textChanged, this,
+		[this](const QString &id) { titles->setKickClientId(id); });
+	/* The secret field is deliberately absent: it is never saved here. */
 	for (QLineEdit *e : {serverEdit, usernameEdit, mountEdit,
-			     passwordEdit, stationEdit, nowPlayingEdit})
+			     passwordEdit, stationEdit, nowPlayingEdit,
+			     kickClientIdEdit})
 		connect(e, &QLineEdit::textChanged, this,
 			&RadioCoDock::onFieldChanged);
 
@@ -675,6 +809,7 @@ void RadioCoDock::startOutput(bool asAutoStart)
 
 	autoStarted = asAutoStart;
 	connectedName = stationEdit->text();
+	liveTarget = currentTarget();
 	setStatus(QStringLiteral("Connecting…"), StatusKind::Busy);
 
 	if (!obs_output_start(output)) {
@@ -713,6 +848,10 @@ void RadioCoDock::shutdownOutput()
 		obs_output_stop(output);
 		releaseOutput();
 	}
+
+	/* Joins the title workers while the plugin's code is still loaded. */
+	if (titles)
+		titles->shutdown();
 }
 
 void RadioCoDock::releaseOutput()
@@ -734,6 +873,9 @@ void RadioCoDock::releaseOutput()
 	}
 	autoStarted = false;
 	activeMixerIndex = -1;
+	connectGeneration++;
+	if (titles)
+		titles->setRadioLive(false);
 }
 
 /* ------------------------------------------------------------------ */
@@ -769,19 +911,64 @@ void RadioCoDock::onHotkeyDisconnect()
 	stopOutput();
 }
 
+/*
+ * Every press sends, even an unchanged title: after a failure, pressing
+ * Update again is the obvious retry. A radio feed that is still connecting
+ * gets the title from scheduleRadioTitle() once it is live.
+ */
 void RadioCoDock::onUpdateClicked()
 {
-	if (!output)
-		return;
-
 	const QString song = nowPlayingEdit->text();
 	if (song.isEmpty())
 		return;
 
-	obs_data_t *d = obs_data_create();
-	obs_data_set_string(d, "song", song.toUtf8().constData());
-	obs_output_update(output, d);
-	obs_data_release(d);
+	if (output && obs_output_active(output))
+		sendRadioTitle("Update");
+	if (kickEnabled())
+		titles->sendKick(song);
+}
+
+void RadioCoDock::sendRadioTitle(const char *why)
+{
+	const QString song = nowPlayingEdit->text();
+	if (song.isEmpty() || !output || !obs_output_active(output))
+		return;
+
+	blog(LOG_INFO, "[obs-icecast] sending stream name to radio.co (%s)",
+	     why);
+	titles->sendRadio(song, liveTarget);
+}
+
+/*
+ * Each (re)connect is a new source on the server, which starts without our
+ * title. The generation check drops timers from a connection that has since
+ * gone away.
+ */
+void RadioCoDock::scheduleRadioTitle()
+{
+	titles->setRadioLive(true);
+	const int generation = ++connectGeneration;
+	QTimer::singleShot(RADIO_TITLE_DELAY_MS, this, [this, generation] {
+		if (generation == connectGeneration && !shuttingDown)
+			sendRadioTitle("after connect");
+	});
+}
+
+bool RadioCoDock::kickEnabled() const
+{
+	return !kickChannel.isEmpty() && kickTitleBox->isChecked();
+}
+
+RadioTarget RadioCoDock::currentTarget() const
+{
+	RadioTarget t;
+	t.server = serverEdit->text().toStdString();
+	t.username = usernameEdit->text().toStdString();
+	t.password = passwordEdit->text().toStdString();
+	t.mount = mountEdit->text().toStdString();
+	t.port = portSpin->value();
+	t.protocol = protocolBox->currentData().toInt();
+	return t;
 }
 
 void RadioCoDock::onApplyNameClicked()
@@ -888,6 +1075,7 @@ void RadioCoDock::onOutputStarted()
 	liveTimer.start();
 	connectedName = stationEdit->text();
 	setStatus(QStringLiteral("● Live 00:00:00"), StatusKind::Live);
+	scheduleRadioTitle();
 	refreshControls();
 }
 
@@ -918,6 +1106,8 @@ void RadioCoDock::onOutputStopped(int code)
 
 void RadioCoDock::onOutputReconnecting()
 {
+	connectGeneration++;
+	titles->setRadioLive(false);
 	setStatus(QStringLiteral("Reconnecting…"), StatusKind::Busy);
 }
 
@@ -925,28 +1115,36 @@ void RadioCoDock::onOutputReconnected()
 {
 	liveTimer.start();
 	setStatus(QStringLiteral("● Live 00:00:00"), StatusKind::Live);
+	scheduleRadioTitle();
 }
 
 /* ------------------------------------------------------------------ */
 
+QString RadioCoDock::styleFor(StatusKind kind)
+{
+	switch (kind) {
+	case StatusKind::Busy:
+		return QStringLiteral("color: " COLOR_BUSY ";");
+	case StatusKind::Live:
+		return QStringLiteral("color: " COLOR_LIVE ";");
+	case StatusKind::Error:
+		return QStringLiteral("color: " COLOR_ERROR ";");
+	case StatusKind::Idle:
+		break;
+	}
+	return QString();
+}
+
 void RadioCoDock::setStatus(const QString &text, StatusKind kind)
 {
 	statusLabel->setText(text);
+	statusLabel->setStyleSheet(styleFor(kind));
+}
 
-	switch (kind) {
-	case StatusKind::Idle:
-		statusLabel->setStyleSheet(QString());
-		break;
-	case StatusKind::Busy:
-		statusLabel->setStyleSheet(QStringLiteral("color: #e6a817;"));
-		break;
-	case StatusKind::Live:
-		statusLabel->setStyleSheet(QStringLiteral("color: #27ae60;"));
-		break;
-	case StatusKind::Error:
-		statusLabel->setStyleSheet(QStringLiteral("color: #e05a4e;"));
-		break;
-	}
+void RadioCoDock::setKickAccount(const QString &text, StatusKind kind)
+{
+	kickAccountLabel->setText(text);
+	kickAccountLabel->setStyleSheet(styleFor(kind));
 }
 
 void RadioCoDock::refreshControls()
@@ -955,7 +1153,11 @@ void RadioCoDock::refreshControls()
 
 	connectButton->setText(active ? QStringLiteral("Disconnect")
 				      : QStringLiteral("Connect"));
-	updateButton->setEnabled(active && !nowPlayingEdit->text().isEmpty());
+	updateButton->setEnabled((active || kickEnabled()) &&
+				 !nowPlayingEdit->text().isEmpty());
+
+	kickTitleBox->setVisible(!kickChannel.isEmpty());
+	kickDisconnectButton->setEnabled(!kickChannel.isEmpty());
 
 	const bool nameChanged =
 		active && stationEdit->text() != connectedName;
@@ -1038,6 +1240,12 @@ void RadioCoDock::handleFrontendEvent(obs_frontend_event event)
 		break;
 
 	case OBS_FRONTEND_EVENT_STREAMING_STARTED:
+		/* Kick takes a title live or not; set it as the show starts. */
+		if (kickEnabled() && !nowPlayingEdit->text().isEmpty()) {
+			blog(LOG_INFO, "[obs-icecast] OBS stream started; "
+				       "sending stream name to Kick");
+			titles->sendKick(nowPlayingEdit->text());
+		}
 		if (followObsBox->isChecked() && !output)
 			startOutput(true);
 		break;
@@ -1083,6 +1291,9 @@ void RadioCoDock::loadSettings()
 	obs_data_set_default_int(s, "mixer_index", -1);
 	obs_data_set_default_string(s, "song", "");
 	obs_data_set_default_bool(s, "follow_obs", false);
+	obs_data_set_default_bool(s, "kick_title", true);
+	obs_data_set_default_string(s, "kick_client_id", "");
+	obs_data_set_default_string(s, "kick_channel", "");
 
 	const int protocol = (int)obs_data_get_int(s, "protocol");
 	protocolBox->setCurrentIndex(protocolBox->findData(protocol) >= 0
@@ -1120,6 +1331,21 @@ void RadioCoDock::loadSettings()
 	nowPlayingEdit->setText(
 		QString::fromUtf8(obs_data_get_string(s, "song")));
 	followObsBox->setChecked(obs_data_get_bool(s, "follow_obs"));
+
+	kickTitleBox->setChecked(obs_data_get_bool(s, "kick_title"));
+	kickClientIdEdit->setText(
+		QString::fromUtf8(obs_data_get_string(s, "kick_client_id")));
+	titles->setKickClientId(kickClientIdEdit->text());
+	kickChannel = QString::fromUtf8(obs_data_get_string(s, "kick_channel"));
+	kickSecretEdit->setPlaceholderText(
+		titles->kickHasSecret() ? QStringLiteral("Saved in Keychain")
+					: QString());
+	if (kickChannel.isEmpty())
+		setKickAccount(QStringLiteral("Not connected"),
+			       StatusKind::Idle);
+	else
+		setKickAccount(QStringLiteral("Connected: %1").arg(kickChannel),
+			       StatusKind::Live);
 
 	/*
 	 * OBS persists only its own frontend hotkeys (in the profile), so a
@@ -1177,6 +1403,11 @@ void RadioCoDock::saveSettings()
 	obs_data_set_string(s, "song",
 			    nowPlayingEdit->text().toUtf8().constData());
 	obs_data_set_bool(s, "follow_obs", followObsBox->isChecked());
+	obs_data_set_bool(s, "kick_title", kickTitleBox->isChecked());
+	obs_data_set_string(s, "kick_client_id",
+			    kickClientIdEdit->text().trimmed().toUtf8().constData());
+	obs_data_set_string(s, "kick_channel",
+			    kickChannel.toUtf8().constData());
 
 	obs_data_array_t *keys = obs_hotkey_save(connectHotkey);
 	obs_data_set_array(s, "hotkey_connect", keys);
@@ -1189,6 +1420,160 @@ void RadioCoDock::saveSettings()
 
 	obs_data_release(s);
 	bfree(path);
+}
+
+/* ------------------------------------------------------------------ */
+/* Titles: radio.co and Kick                                            */
+/* ------------------------------------------------------------------ */
+
+void RadioCoDock::onTitleStatus(int dest, int state, int attempt,
+				const QString &detail)
+{
+	TitleOutcome &o = dest == (int)TitleDest::Kick ? kickOutcome
+						       : radioOutcome;
+	o.state = state;
+	o.attempt = attempt;
+	o.detail = detail;
+	o.at = QTime::currentTime();
+
+	if (dest == (int)TitleDest::Kick &&
+	    state == (int)TitleState::NeedsSignIn)
+		setKickAccount(QStringLiteral("Sign-in no longer valid: press "
+					      "Connect Kick"),
+			       StatusKind::Error);
+
+	renderTitleStatus();
+}
+
+/*
+ * One line, one colored part per destination, e.g.
+ * "radio.co ✓ 21:04 · Kick: retry 1/3…". Details go to the tooltip and the
+ * OBS log; the line stays short enough for a narrow dock.
+ */
+void RadioCoDock::renderTitleStatus()
+{
+	struct Part {
+		const char *name;
+		const TitleOutcome *o;
+	};
+	QStringList parts, tips;
+
+	for (const Part &p : {Part{"radio.co", &radioOutcome},
+			      Part{"Kick", &kickOutcome}}) {
+		if (p.o->state < 0)
+			continue;
+		if (p.o == &kickOutcome && !kickEnabled())
+			continue;
+
+		const QString name = QString::fromLatin1(p.name);
+		QString text;
+		const char *color = nullptr;
+		switch ((TitleState)p.o->state) {
+		case TitleState::Sending:
+			text = QStringLiteral("%1: sending\u2026").arg(name);
+			color = COLOR_BUSY;
+			break;
+		case TitleState::Done:
+			text = QStringLiteral("%1 \u2713 %2")
+				       .arg(name, p.o->at.toString(
+							  QStringLiteral("HH:mm")));
+			color = COLOR_LIVE;
+			break;
+		case TitleState::Retrying:
+			text = QStringLiteral("%1: retry %2/3\u2026")
+				       .arg(name)
+				       .arg(p.o->attempt);
+			color = COLOR_BUSY;
+			break;
+		case TitleState::Failed:
+			text = QStringLiteral("%1 \u2717 not set").arg(name);
+			color = COLOR_ERROR;
+			break;
+		case TitleState::NeedsSignIn:
+			text = QStringLiteral("%1 \u2717 sign in again (gear)")
+				       .arg(name);
+			color = COLOR_ERROR;
+			break;
+		case TitleState::Dropped:
+			text = QStringLiteral("%1: not sent (off air)").arg(name);
+			break;
+		}
+
+		parts << (color ? QStringLiteral("<span style=\"color:%1\">"
+						 "%2</span>")
+					  .arg(QLatin1String(color),
+					       text.toHtmlEscaped())
+				: text.toHtmlEscaped());
+		if (!p.o->detail.isEmpty())
+			tips << QStringLiteral("%1: %2").arg(name, p.o->detail);
+	}
+
+	titleStatusLabel->setText(parts.join(QStringLiteral(" \u00b7 ")));
+	titleStatusLabel->setToolTip(tips.join(QLatin1Char('\n')));
+	titleStatusLabel->setVisible(!parts.isEmpty());
+}
+
+void RadioCoDock::onKickSecretEntered()
+{
+	const QString secret = kickSecretEdit->text();
+	if (secret.trimmed().isEmpty())
+		return;
+
+	/* Cleared either way: the secret must not linger in a widget. */
+	kickSecretEdit->clear();
+	if (titles->setKickSecret(secret)) {
+		kickSecretEdit->setPlaceholderText(
+			QStringLiteral("Saved in Keychain"));
+		blog(LOG_INFO, "[obs-icecast] kick: client secret saved to "
+			       "the keychain");
+	} else {
+		setKickAccount(QStringLiteral("Could not save the secret to "
+					      "the keychain (see log)"),
+			       StatusKind::Error);
+	}
+}
+
+void RadioCoDock::onKickConnectClicked()
+{
+	/* A secret typed but not yet confirmed still counts. */
+	onKickSecretEntered();
+	saveSettings();
+
+	QString url, error;
+	if (!titles->beginKickConnect(url, error)) {
+		setKickAccount(error, StatusKind::Error);
+		return;
+	}
+	setKickAccount(QStringLiteral("Waiting for the browser\u2026"),
+		       StatusKind::Busy);
+	QDesktopServices::openUrl(QUrl::fromEncoded(url.toUtf8()));
+}
+
+void RadioCoDock::onKickConnectFinished(bool ok, const QString &text)
+{
+	if (!ok) {
+		setKickAccount(text, StatusKind::Error);
+		return;
+	}
+
+	kickChannel = text;
+	kickOutcome = TitleOutcome();
+	setKickAccount(QStringLiteral("Connected: %1").arg(kickChannel),
+		       StatusKind::Live);
+	saveSettings();
+	renderTitleStatus();
+	refreshControls();
+}
+
+void RadioCoDock::onKickDisconnectClicked()
+{
+	titles->disconnectKick();
+	kickChannel.clear();
+	kickOutcome = TitleOutcome();
+	setKickAccount(QStringLiteral("Not connected"), StatusKind::Idle);
+	saveSettings();
+	renderTitleStatus();
+	refreshControls();
 }
 
 /* ------------------------------------------------------------------ */

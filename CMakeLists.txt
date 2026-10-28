@@ -14,7 +14,7 @@ cmake_minimum_required(VERSION 3.16...3.26)
 set(CMAKE_OSX_DEPLOYMENT_TARGET "13.0" CACHE STRING "Minimum macOS version")
 set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "Build architectures")
 
-project(obs-icecast VERSION 1.2.0 LANGUAGES C CXX)
+project(obs-icecast VERSION 1.3.0 LANGUAGES C CXX)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -145,6 +145,8 @@ add_library(obs-icecast MODULE
     src/mp3-encoder.c
     src/icecast-output.c
     src/icy-protocol.c
+    src/kick-api.c
+    src/title-sync.cpp
     src/radioco-dock.cpp
 )
 
@@ -198,6 +200,11 @@ if(APPLE)
         obs-qtGui
         obs-qtWidgets
         obs-frontend-api
+        # Kick title: HTTPS through the system libcurl (OBS links the same
+        # /usr/lib/libcurl.4.dylib), secrets in the keychain.
+        curl
+        "-framework Security"
+        "-framework CoreFoundation"
     )
 
     # Replace the absolute /Applications/OBS.app/... rpath CMake would

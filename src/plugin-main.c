@@ -23,12 +23,14 @@
 #include "mp3-encoder.h"
 #include "icecast-output.h"
 #include "radioco-dock.h"
+#include "kick-api.h"
 
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE("obs-icecast", "en-US")
 
 bool obs_module_load(void)
 {
+	kick_global_init();
 	obs_register_encoder(&icecast_mp3_encoder);
 	obs_register_output(&icecast_output_info);
 	blog(LOG_INFO, "[obs-icecast] plugin loaded (version %s)",
@@ -50,5 +52,6 @@ void obs_module_post_load(void)
 void obs_module_unload(void)
 {
 	radioco_dock_free();
+	kick_global_free();
 	blog(LOG_INFO, "[obs-icecast] plugin unloaded");
 }

@@ -25,7 +25,9 @@ Quit OBS before changing or backing up:
 ```
 
 The file contains the broadcast password in plaintext. Never print it, copy it
-into the repository, or publish it. OBS rewrites this file on exit, so make
+into the repository, or publish it. The Kick client secret and tokens are in
+the login keychain instead (README, "Configuration file"); never read them
+with `security … -w` or paste them anywhere. OBS rewrites this file on exit, so make
 all test-configuration changes only after OBS has quit. Back it up before
 local testing and restore it after the final test run has exited.
 
@@ -89,8 +91,9 @@ otool -L \
 ```
 
 The signature must report identifier `io.github.nurettinselim.obs-icecast`.
-The binary may link only `@rpath/…`, `/usr/lib/libc++.1.dylib`, and
-`/usr/lib/libSystem.B.dylib`. Install this extracted bundle and repeat the
+The binary may link only `@rpath/…`, `/usr/lib/libcurl.4.dylib`, the
+`Security` and `CoreFoundation` system frameworks, `/usr/lib/libc++.1.dylib`,
+and `/usr/lib/libSystem.B.dylib`. Install this extracted bundle and repeat the
 local-sink Connect check so the exact packaged artifact is exercised.
 
 ## Commit and publish

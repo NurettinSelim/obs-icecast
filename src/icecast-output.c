@@ -32,22 +32,6 @@ struct icecast_output {
 	pthread_t connect_thread;
 	volatile bool connecting;
 	os_event_t *stop_event;
-	char *last_song;
-};
-
-/*
- * A metadata update runs on a detached thread and must never dereference
- * struct icecast_output — an update racing shutdown would be a
- * use-after-free — so everything it needs is copied at dispatch time.
- */
-struct metadata_job {
-	char *server;
-	char *username;
-	char *password;
-	char *mount;
-	char *song;
-	int port;
-	int protocol;
 };
 
 /* ------------------------------------------------------------------ */
@@ -80,7 +64,6 @@ static void icecast_destroy(void *data)
 
 	os_event_destroy(out->stop_event);
 	pthread_mutex_destroy(&out->write_mutex);
-	bfree(out->last_song);
 	bfree(out);
 }
 
@@ -229,94 +212,12 @@ static void icecast_encoded_packet(void *data,
 
 /* ------------------------------------------------------------------ */
 
-static void metadata_job_free(struct metadata_job *job)
-{
-	bfree(job->server);
-	bfree(job->username);
-	bfree(job->password);
-	bfree(job->mount);
-	bfree(job->song);
-	bfree(job);
-}
-
-static void *metadata_thread(void *arg)
-{
-	struct metadata_job *job = arg;
-
-	struct icy_params params = {
-		.server = job->server,
-		.port = job->port,
-		.password = job->password,
-		.username = job->username,
-		.mount = job->mount,
-		.protocol = job->protocol,
-	};
-
-	char error[512] = {0};
-	if (icy_update_metadata(&params, job->song, error, sizeof(error)) == 0)
-		blog(LOG_INFO, "[icy] metadata updated: %s", job->song);
-	else
-		blog(LOG_WARNING, "[icy] metadata update failed: %s", error);
-
-	metadata_job_free(job);
-	return NULL;
-}
-
-/*
- * Called by libobs whenever the output's settings change. The dock uses it
- * to push a now-playing line without interrupting audio.
- */
-static void icecast_update(void *data, obs_data_t *settings)
-{
-	struct icecast_output *out = data;
-
-	const char *song = obs_data_get_string(settings, "song");
-	if (!song || !*song)
-		return;
-
-	/*
-	 * Only send while connected, and only when the title actually
-	 * changed — otherwise a repeatedly applied identical title would
-	 * open a socket every time.
-	 */
-	pthread_mutex_lock(&out->write_mutex);
-	if (out->sock_fd < 0 ||
-	    (out->last_song && strcmp(out->last_song, song) == 0)) {
-		pthread_mutex_unlock(&out->write_mutex);
-		return;
-	}
-	bfree(out->last_song);
-	out->last_song = bstrdup(song);
-	pthread_mutex_unlock(&out->write_mutex);
-
-	struct metadata_job *job = bzalloc(sizeof(*job));
-	job->server = bstrdup(obs_data_get_string(settings, "server"));
-	job->username = bstrdup(obs_data_get_string(settings, "username"));
-	job->password = bstrdup(obs_data_get_string(settings, "password"));
-	job->mount = bstrdup(obs_data_get_string(settings, "mount"));
-	job->song = bstrdup(song);
-	job->port = (int)obs_data_get_int(settings, "port");
-	job->protocol = (int)obs_data_get_int(settings, "protocol");
-
-	pthread_t thread;
-	if (pthread_create(&thread, NULL, metadata_thread, job) != 0) {
-		blog(LOG_ERROR,
-		     "[icy] failed to create metadata thread; update dropped");
-		metadata_job_free(job);
-		return;
-	}
-	pthread_detach(thread);
-}
-
-/* ------------------------------------------------------------------ */
-
 static void icecast_defaults(obs_data_t *settings)
 {
 	obs_data_set_default_int(settings, "port", 8000);
 	obs_data_set_default_int(settings, "protocol", 0); /* PROTOCOL_ICECAST */
 	obs_data_set_default_string(settings, "username", "source");
 	obs_data_set_default_string(settings, "mount", "/");
-	obs_data_set_default_string(settings, "song", "");
 	obs_data_set_default_string(settings, "station_name", "OBS Stream");
 	obs_data_set_default_string(settings, "genre", "Various");
 	obs_data_set_default_bool(settings, "is_public", false);
@@ -372,5 +273,4 @@ struct obs_output_info icecast_output_info = {
 	.encoded_packet = icecast_encoded_packet,
 	.get_defaults = icecast_defaults,
 	.get_properties = icecast_properties,
-	.update = icecast_update,
 };
