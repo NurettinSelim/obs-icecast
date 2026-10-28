@@ -823,11 +823,25 @@ void RadioCoDock::startOutput(bool asAutoStart)
 	refreshControls();
 }
 
+/*
+ * obs_output_stop ignores an output that is still connecting (libobs stops
+ * only active or reconnecting ones), so a Disconnect pressed then was lost
+ * and the radio went live anyway. force_stop always reaches icecast_stop,
+ * which aborts the connect; the "stop" signal follows as usual.
+ */
+static void stop_or_abort(obs_output_t *output)
+{
+	if (obs_output_active(output))
+		obs_output_stop(output);
+	else
+		obs_output_force_stop(output);
+}
+
 void RadioCoDock::stopOutput()
 {
 	if (!output)
 		return;
-	obs_output_stop(output);
+	stop_or_abort(output);
 	setStatus(QStringLiteral("Disconnecting…"), StatusKind::Busy);
 }
 
@@ -845,7 +859,7 @@ void RadioCoDock::shutdownOutput()
 		tickTimer->stop();
 
 	if (output) {
-		obs_output_stop(output);
+		stop_or_abort(output);
 		releaseOutput();
 	}
 
@@ -905,7 +919,9 @@ void RadioCoDock::onHotkeyConnect()
 void RadioCoDock::onHotkeyDisconnect()
 {
 	blog(LOG_INFO, "[obs-icecast] hotkey: disconnect (%s)",
-	     output ? "disconnecting" : "not connected, ignored");
+	     !output                    ? "not connected, ignored"
+	     : obs_output_active(output) ? "disconnecting"
+					 : "cancelling the connect");
 	if (shuttingDown || !output)
 		return;
 	stopOutput();

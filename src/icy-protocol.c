@@ -25,6 +25,8 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <netdb.h>
+#include <poll.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <string.h>
 #include <stdio.h>
@@ -32,8 +34,10 @@
 #include <errno.h>
 
 #include <obs.h>
+#include <util/threading.h>
 
 #define ICY_TIMEOUT_SEC 10
+#define ICY_POLL_MS 100
 #define ICY_RECV_BUF 4096
 
 /* Use MSG_NOSIGNAL on Linux; SO_NOSIGPIPE is set on macOS instead */
@@ -172,7 +176,72 @@ static void build_basic_auth(const struct icy_params *params, char *out,
 /* TCP connection                                                     */
 /* ------------------------------------------------------------------ */
 
-static int icy_tcp_connect(const char *server, int port, char *error_buf,
+/*
+ * Waits for fd to become ready in ICY_POLL_MS slices, so a stop request is
+ * noticed within a tenth of a second instead of after a whole timeout.
+ * Returns 1 when ready, 0 after ICY_TIMEOUT_SEC, -1 when aborted, -2 on a
+ * poll error (errno set).
+ */
+static int wait_ready(int fd, short events, const volatile bool *abort)
+{
+	for (int waited = 0; waited < ICY_TIMEOUT_SEC * 1000;
+	     waited += ICY_POLL_MS) {
+		if (abort && os_atomic_load_bool(abort))
+			return -1;
+		struct pollfd p = {.fd = fd, .events = events};
+		const int r = poll(&p, 1, ICY_POLL_MS);
+		if (r > 0)
+			return 1;
+		if (r < 0 && errno != EINTR)
+			return -2;
+	}
+	return 0;
+}
+
+/*
+ * A blocking connect() cannot be interrupted and waits over a minute for an
+ * unreachable host, so it runs non-blocking under wait_ready. The socket is
+ * blocking again on return. On failure *err holds the errno, ECANCELED when
+ * aborted.
+ */
+static bool connect_socket(int fd, const struct addrinfo *ai,
+			   const volatile bool *abort, int *err)
+{
+	const int flags = fcntl(fd, F_GETFL, 0);
+	fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+
+	bool ok = connect(fd, ai->ai_addr, ai->ai_addrlen) == 0;
+	if (!ok && errno == EINPROGRESS) {
+		int so_err = 0;
+		socklen_t len = sizeof(so_err);
+		switch (wait_ready(fd, POLLOUT, abort)) {
+		case 1:
+			if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &so_err,
+				       &len) != 0)
+				so_err = errno;
+			ok = so_err == 0;
+			*err = so_err;
+			break;
+		case 0:
+			*err = ETIMEDOUT;
+			break;
+		case -1:
+			*err = ECANCELED;
+			break;
+		default:
+			*err = errno;
+			break;
+		}
+	} else if (!ok) {
+		*err = errno;
+	}
+
+	fcntl(fd, F_SETFL, flags);
+	return ok;
+}
+
+static int icy_tcp_connect(const char *server, int port,
+			   const volatile bool *abort, char *error_buf,
 			   size_t error_len)
 {
 	struct addrinfo hints = {0};
@@ -194,21 +263,30 @@ static int icy_tcp_connect(const char *server, int port, char *error_buf,
 		return -1;
 	}
 
+	int err = 0;
 	for (struct addrinfo *ai = res; ai != NULL; ai = ai->ai_next) {
 		sock_fd = socket(ai->ai_family, ai->ai_socktype,
 				 ai->ai_protocol);
-		if (sock_fd < 0)
+		if (sock_fd < 0) {
+			err = errno;
 			continue;
-		if (connect(sock_fd, ai->ai_addr, ai->ai_addrlen) == 0)
+		}
+		if (connect_socket(sock_fd, ai, abort, &err))
 			break;
 		close(sock_fd);
 		sock_fd = -1;
+		if (err == ECANCELED)
+			break;
 	}
 	freeaddrinfo(res);
 
 	if (sock_fd < 0) {
-		snprintf(error_buf, error_len, "Failed to connect to %s:%d: %s",
-			 server, port, strerror(errno));
+		if (err == ECANCELED)
+			snprintf(error_buf, error_len, "Connect cancelled");
+		else
+			snprintf(error_buf, error_len,
+				 "Failed to connect to %s:%d: %s", server,
+				 port, strerror(err));
 		return -1;
 	}
 
@@ -234,8 +312,32 @@ static int icy_tcp_connect(const char *server, int port, char *error_buf,
 /* Handshakes                                                         */
 /* ------------------------------------------------------------------ */
 
+/*
+ * Waits for the server's answer to a handshake. On failure fills error_buf
+ * and closes the socket.
+ */
+static bool await_reply(int sock_fd, const volatile bool *abort,
+			char *error_buf, size_t error_len)
+{
+	const int r = wait_ready(sock_fd, POLLIN, abort);
+	if (r == 1)
+		return true;
+
+	if (r == -1)
+		snprintf(error_buf, error_len, "Connect cancelled");
+	else if (r == 0)
+		snprintf(error_buf, error_len,
+			 "No response from server (connection may have been rejected)");
+	else
+		snprintf(error_buf, error_len, "Waiting for the server failed: %s",
+			 strerror(errno));
+	close(sock_fd);
+	return false;
+}
+
 static int icy_handshake_shoutcast(int sock_fd,
 				   const struct icy_params *params,
+				   const volatile bool *abort,
 				   char *error_buf, size_t error_len)
 {
 	/* 1. Send password */
@@ -250,6 +352,8 @@ static int icy_handshake_shoutcast(int sock_fd,
 	}
 
 	/* 2. Read server response — expect "OK" */
+	if (!await_reply(sock_fd, abort, error_buf, error_len))
+		return -1;
 	char recv_buf[ICY_RECV_BUF];
 	ssize_t n = recv(sock_fd, recv_buf, sizeof(recv_buf) - 1, 0);
 	if (n <= 0) {
@@ -299,7 +403,8 @@ static int icy_handshake_shoutcast(int sock_fd,
 }
 
 static int icy_handshake_icecast(int sock_fd, const struct icy_params *params,
-				 char *error_buf, size_t error_len)
+				 const volatile bool *abort, char *error_buf,
+				 size_t error_len)
 {
 	const char *url = params->url ? params->url : "";
 	char mount[256];
@@ -357,6 +462,8 @@ static int icy_handshake_icecast(int sock_fd, const struct icy_params *params,
 		return -1;
 	}
 
+	if (!await_reply(sock_fd, abort, error_buf, error_len))
+		return -1;
 	char recv_buf[ICY_RECV_BUF];
 	ssize_t n = recv(sock_fd, recv_buf, sizeof(recv_buf) - 1, 0);
 	if (n <= 0) {
@@ -413,8 +520,8 @@ static int icy_handshake_icecast(int sock_fd, const struct icy_params *params,
 /* Public API                                                         */
 /* ------------------------------------------------------------------ */
 
-int icy_connect(const struct icy_params *params, char *error_buf,
-		size_t error_len)
+int icy_connect(const struct icy_params *params, const volatile bool *abort,
+		char *error_buf, size_t error_len)
 {
 	/*
 	 * SHOUTcast v1 splits its ports: the configured port is the admin /
@@ -427,16 +534,17 @@ int icy_connect(const struct icy_params *params, char *error_buf,
 	const bool shoutcast = params->protocol == PROTOCOL_SHOUTCAST_V1;
 	const int port = shoutcast ? params->port + 1 : params->port;
 
-	int sock_fd = icy_tcp_connect(params->server, port, error_buf,
+	int sock_fd = icy_tcp_connect(params->server, port, abort, error_buf,
 				      error_len);
 	if (sock_fd < 0)
 		return -1;
 
 	if (shoutcast)
-		return icy_handshake_shoutcast(sock_fd, params, error_buf,
-					       error_len);
+		return icy_handshake_shoutcast(sock_fd, params, abort,
+					       error_buf, error_len);
 
-	return icy_handshake_icecast(sock_fd, params, error_buf, error_len);
+	return icy_handshake_icecast(sock_fd, params, abort, error_buf,
+				     error_len);
 }
 
 int icy_update_metadata(const struct icy_params *params, const char *song,
@@ -500,8 +608,8 @@ int icy_update_metadata(const struct icy_params *params, const char *song,
 		return -2;
 	}
 
-	int sock_fd = icy_tcp_connect(params->server, params->port, error_buf,
-				      error_len);
+	int sock_fd = icy_tcp_connect(params->server, params->port, NULL,
+				      error_buf, error_len);
 	if (sock_fd < 0)
 		return -1;
 

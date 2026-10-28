@@ -47,10 +47,13 @@ struct icy_params {
 /*
  * Connect to a streaming server.
  * Supports both Icecast (HTTP SOURCE) and SHOUTcast v1 (ICY) protocols.
+ * The TCP connect and the wait for the server's answer each time out after
+ * 10 s and return within a tenth of a second once *abort turns true
+ * (abort may be NULL). Name resolution is not interruptible.
  * Returns a connected socket fd on success, -1 on failure.
  */
-int icy_connect(const struct icy_params *params, char *error_buf,
-		size_t error_len);
+int icy_connect(const struct icy_params *params, const volatile bool *abort,
+		char *error_buf, size_t error_len);
 
 /*
  * Push a now-playing line. The string is sent verbatim as the whole title.

@@ -30,8 +30,8 @@ struct icecast_output {
 	int sock_fd;
 	pthread_mutex_t write_mutex;
 	pthread_t connect_thread;
-	volatile bool connecting;
-	os_event_t *stop_event;
+	bool connect_thread_active; /* started and not yet joined */
+	volatile bool stop_requested;
 };
 
 /* ------------------------------------------------------------------ */
@@ -50,19 +50,36 @@ static void *icecast_create(obs_data_t *settings, obs_output_t *output)
 	out->output = output;
 	out->sock_fd = -1;
 	pthread_mutex_init(&out->write_mutex, NULL);
-	os_event_init(&out->stop_event, OS_EVENT_TYPE_MANUAL);
 
 	return out;
+}
+
+/*
+ * Usually the thread returned long ago. One still connecting sees
+ * stop_requested within a tenth of a second (icy_connect polls it).
+ */
+static void join_connect_thread(struct icecast_output *out)
+{
+	if (!out->connect_thread_active)
+		return;
+	pthread_join(out->connect_thread, NULL);
+	out->connect_thread_active = false;
 }
 
 static void icecast_destroy(void *data)
 {
 	struct icecast_output *out = data;
 
+	/*
+	 * libobs stops only active outputs before destroying them, so a
+	 * connect may still be running here; it must end before `out` goes.
+	 */
+	os_atomic_set_bool(&out->stop_requested, true);
+	join_connect_thread(out);
+
 	if (out->sock_fd >= 0)
 		icy_disconnect(out->sock_fd);
 
-	os_event_destroy(out->stop_event);
 	pthread_mutex_destroy(&out->write_mutex);
 	bfree(out);
 }
@@ -98,22 +115,22 @@ static void *connect_thread(void *data)
 		params.bitrate = 128;
 
 	char error[512] = {0};
-	int fd = icy_connect(&params, error, sizeof(error));
+	int fd = icy_connect(&params, &out->stop_requested, error,
+			     sizeof(error));
 
 	obs_data_release(settings);
 
-	/* Check if stop was signalled while we were connecting */
-	if (os_event_try(out->stop_event) == 0) {
+	/* Stopped while connecting: icecast_stop reports the stop. */
+	if (os_atomic_load_bool(&out->stop_requested)) {
 		if (fd >= 0)
 			icy_disconnect(fd);
-		out->connecting = false;
+		blog(LOG_INFO, "[icecast] connect cancelled");
 		return NULL;
 	}
 
 	if (fd < 0) {
 		blog(LOG_ERROR, "[icecast] connection failed: %s", error);
 		obs_output_signal_stop(out->output, OBS_OUTPUT_CONNECT_FAILED);
-		out->connecting = false;
 		return NULL;
 	}
 
@@ -121,7 +138,6 @@ static void *connect_thread(void *data)
 	out->sock_fd = fd;
 	pthread_mutex_unlock(&out->write_mutex);
 
-	out->connecting = false;
 	obs_output_begin_data_capture(out->output, 0);
 
 	blog(LOG_INFO, "[icecast] streaming started");
@@ -145,16 +161,20 @@ static bool icecast_start(void *data)
 		return false;
 	}
 
-	os_event_reset(out->stop_event);
-	out->connecting = true;
+	/*
+	 * On a reconnect, the previous attempt's thread has returned, or is
+	 * returning: a failed attempt schedules the reconnect itself.
+	 */
+	join_connect_thread(out);
+	os_atomic_set_bool(&out->stop_requested, false);
 
 	int ret = pthread_create(&out->connect_thread, NULL, connect_thread,
 				 out);
 	if (ret != 0) {
 		blog(LOG_ERROR, "[icecast] failed to create connect thread");
-		out->connecting = false;
 		return false;
 	}
+	out->connect_thread_active = true;
 
 	return true;
 }
@@ -164,12 +184,10 @@ static void icecast_stop(void *data, uint64_t ts)
 	struct icecast_output *out = data;
 	UNUSED_PARAMETER(ts);
 
-	os_event_signal(out->stop_event);
+	os_atomic_set_bool(&out->stop_requested, true);
+	join_connect_thread(out);
 
-	/* Wait for connection thread if it's still running */
-	if (out->connecting)
-		pthread_join(out->connect_thread, NULL);
-
+	/* Also reports the stop when the output never went live. */
 	obs_output_end_data_capture(out->output);
 
 	pthread_mutex_lock(&out->write_mutex);
