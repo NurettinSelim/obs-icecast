@@ -70,6 +70,16 @@
  */
 #define RADIO_TITLE_DELAY_MS 15000
 
+/*
+ * Stream Deck keys that work whatever has keyboard focus: filters on a hidden
+ * source, toggled by the Elgato OBS plugin's Filter action. Every toggle is a
+ * press, on or off: libobs signals "enable" on each obs_source_set_enabled.
+ * The same source carries the break timer script's keys (mola-sayaci.lua).
+ */
+#define KEY_SOURCE "Stream Deck Tuşları"
+#define KEY_CONNECT "Radyo Başlat"
+#define KEY_DISCONNECT "Radyo Durdur"
+
 /* ------------------------------------------------------------------ */
 
 /*
@@ -233,8 +243,8 @@ public slots:
 	void onOutputStopped(int code);
 	void onOutputReconnecting();
 	void onOutputReconnected();
-	void onHotkeyConnect();
-	void onHotkeyDisconnect();
+	void onKeyConnect(const QString &via);
+	void onKeyDisconnect(const QString &via);
 	void onTitleStatus(int dest, int state, int attempt,
 			   const QString &detail);
 	void onKickConnectFinished(bool ok, const QString &text);
@@ -255,6 +265,8 @@ private:
 	void startOutput(bool asAutoStart);
 	void stopOutput();
 	void releaseOutput();
+	void bindKeys();
+	void unbindKeys();
 	void buildSettingsDialog();
 	void loadSettings();
 	void saveSettings();
@@ -322,6 +334,15 @@ private:
 	obs_hotkey_id connectHotkey = OBS_INVALID_HOTKEY_ID;
 	obs_hotkey_id disconnectHotkey = OBS_INVALID_HOTKEY_ID;
 
+	/*
+	 * The bound filter keys, held by reference: their signal handlers
+	 * must outlive the connection made on them.
+	 */
+	obs_source_t *keyConnectFilter = nullptr;
+	obs_source_t *keyDisconnectFilter = nullptr;
+	bool keysReady = false; /* a scene collection is fully loaded */
+	QString keysLogged;     /* last binding logged */
+
 	QElapsedTimer liveTimer;
 	QString connectedName;
 	bool pendingRestart = false;
@@ -387,8 +408,9 @@ static void hotkey_connect(void *data, obs_hotkey_id id, obs_hotkey_t *key,
 	UNUSED_PARAMETER(key);
 	if (pressed)
 		QMetaObject::invokeMethod(static_cast<RadioCoDock *>(data),
-					  "onHotkeyConnect",
-					  Qt::QueuedConnection);
+					  "onKeyConnect", Qt::QueuedConnection,
+					  Q_ARG(QString,
+						QStringLiteral("hotkey")));
 }
 
 static void hotkey_disconnect(void *data, obs_hotkey_id id, obs_hotkey_t *key,
@@ -398,8 +420,33 @@ static void hotkey_disconnect(void *data, obs_hotkey_id id, obs_hotkey_t *key,
 	UNUSED_PARAMETER(key);
 	if (pressed)
 		QMetaObject::invokeMethod(static_cast<RadioCoDock *>(data),
-					  "onHotkeyDisconnect",
-					  Qt::QueuedConnection);
+					  "onKeyDisconnect",
+					  Qt::QueuedConnection,
+					  Q_ARG(QString,
+						QStringLiteral("hotkey")));
+}
+
+/*
+ * A filter key's "enable" signal fires on whichever thread toggled it: the
+ * Elgato plugin's RPC thread for a Stream Deck press, the UI thread for a
+ * click on the filter's eye icon.
+ */
+static void filter_key_connect(void *data, calldata_t *cd)
+{
+	UNUSED_PARAMETER(cd);
+	QMetaObject::invokeMethod(static_cast<RadioCoDock *>(data),
+				  "onKeyConnect", Qt::QueuedConnection,
+				  Q_ARG(QString, QStringLiteral(
+							 "key " KEY_CONNECT)));
+}
+
+static void filter_key_disconnect(void *data, calldata_t *cd)
+{
+	UNUSED_PARAMETER(cd);
+	QMetaObject::invokeMethod(static_cast<RadioCoDock *>(data),
+				  "onKeyDisconnect", Qt::QueuedConnection,
+				  Q_ARG(QString, QStringLiteral(
+							 "key " KEY_DISCONNECT)));
 }
 
 /* ------------------------------------------------------------------ */
@@ -709,6 +756,7 @@ RadioCoDock::~RadioCoDock()
 	if (tickTimer)
 		tickTimer->stop();
 	releaseOutput();
+	unbindKeys();
 	if (connectHotkey != OBS_INVALID_HOTKEY_ID)
 		obs_hotkey_unregister(connectHotkey);
 	if (disconnectHotkey != OBS_INVALID_HOTKEY_ID)
@@ -858,6 +906,9 @@ void RadioCoDock::shutdownOutput()
 	if (tickTimer)
 		tickTimer->stop();
 
+	keysReady = false;
+	unbindKeys();
+
 	if (output) {
 		stop_or_abort(output);
 		releaseOutput();
@@ -903,28 +954,116 @@ void RadioCoDock::onConnectClicked()
 }
 
 /*
- * A hotkey start counts as manual, like the Connect button: stopping the OBS
- * stream later leaves it on air even when "Connect with OBS Start Streaming"
- * is ticked.
+ * Hotkeys and Stream Deck filter keys. A key start counts as manual, like the
+ * Connect button: stopping the OBS stream later leaves it on air even when
+ * "Connect with OBS Start Streaming" is ticked.
  */
-void RadioCoDock::onHotkeyConnect()
+void RadioCoDock::onKeyConnect(const QString &via)
 {
-	blog(LOG_INFO, "[obs-icecast] hotkey: connect (%s)",
+	blog(LOG_INFO, "[obs-icecast] %s: connect (%s)",
+	     via.toUtf8().constData(),
 	     output ? "already connected, ignored" : "connecting");
 	if (shuttingDown || output)
 		return;
 	startOutput(false);
 }
 
-void RadioCoDock::onHotkeyDisconnect()
+void RadioCoDock::onKeyDisconnect(const QString &via)
 {
-	blog(LOG_INFO, "[obs-icecast] hotkey: disconnect (%s)",
+	blog(LOG_INFO, "[obs-icecast] %s: disconnect (%s)",
+	     via.toUtf8().constData(),
 	     !output                    ? "not connected, ignored"
 	     : obs_output_active(output) ? "disconnecting"
 					 : "cancelling the connect");
 	if (shuttingDown || !output)
 		return;
 	stopOutput();
+}
+
+/*
+ * Finds the filter keys by name. Runs once the scene collection has loaded
+ * and then every second from onTick, so keys added, renamed or removed later
+ * need no restart: filters loaded from a collection are private sources, so
+ * no global signal reports their renames. Rebinds and logs only when the
+ * result changes.
+ */
+void RadioCoDock::bindKeys()
+{
+	if (!keysReady || shuttingDown) {
+		unbindKeys();
+		return;
+	}
+
+	obs_source_t *source = obs_get_source_by_name(KEY_SOURCE);
+	const bool found = source && !obs_source_removed(source);
+	obs_source_t *connectFilter =
+		found ? obs_source_get_filter_by_name(source, KEY_CONNECT)
+		      : nullptr;
+	obs_source_t *disconnectFilter =
+		found ? obs_source_get_filter_by_name(source, KEY_DISCONNECT)
+		      : nullptr;
+	obs_source_release(source);
+
+	if (connectFilter == keyConnectFilter &&
+	    disconnectFilter == keyDisconnectFilter) {
+		obs_source_release(connectFilter);
+		obs_source_release(disconnectFilter);
+	} else {
+		unbindKeys();
+		keyConnectFilter = connectFilter;
+		keyDisconnectFilter = disconnectFilter;
+		if (keyConnectFilter)
+			signal_handler_connect(
+				obs_source_get_signal_handler(keyConnectFilter),
+				"enable", filter_key_connect, this);
+		if (keyDisconnectFilter)
+			signal_handler_connect(obs_source_get_signal_handler(
+						       keyDisconnectFilter),
+					       "enable", filter_key_disconnect,
+					       this);
+	}
+
+	QStringList bound;
+	if (keyConnectFilter)
+		bound << QStringLiteral(KEY_CONNECT);
+	if (keyDisconnectFilter)
+		bound << QStringLiteral(KEY_DISCONNECT);
+
+	QString state;
+	if (!bound.isEmpty())
+		state = QStringLiteral("radio keys bound: ") +
+			bound.join(QStringLiteral(", "));
+	else if (found)
+		state = QStringLiteral("radio keys: no \"" KEY_CONNECT
+				       "\" or \"" KEY_DISCONNECT
+				       "\" filter on \"" KEY_SOURCE
+				       "\"; hotkeys only");
+	else
+		state = QStringLiteral("radio keys: no source \"" KEY_SOURCE
+				       "\"; hotkeys only");
+
+	if (state != keysLogged) {
+		keysLogged = state;
+		blog(LOG_INFO, "[obs-icecast] %s", state.toUtf8().constData());
+	}
+}
+
+void RadioCoDock::unbindKeys()
+{
+	if (keyConnectFilter) {
+		signal_handler_disconnect(
+			obs_source_get_signal_handler(keyConnectFilter),
+			"enable", filter_key_connect, this);
+		obs_source_release(keyConnectFilter);
+		keyConnectFilter = nullptr;
+	}
+	if (keyDisconnectFilter) {
+		signal_handler_disconnect(
+			obs_source_get_signal_handler(keyDisconnectFilter),
+			"enable", filter_key_disconnect, this);
+		obs_source_release(keyDisconnectFilter);
+		keyDisconnectFilter = nullptr;
+	}
 }
 
 /*
@@ -1049,6 +1188,8 @@ void RadioCoDock::onTick()
 {
 	if (shuttingDown)
 		return;
+
+	bindKeys();
 
 	if (output && obs_output_active(output)) {
 		const qint64 secs = liveTimer.isValid()
@@ -1241,6 +1382,26 @@ void RadioCoDock::handleFrontendEvent(obs_frontend_event event)
 		/* Only now is it safe to ask the frontend about outputs. */
 		frontend_ready = true;
 		updateTrackStatus();
+		keysReady = true;
+		bindKeys();
+		break;
+
+	/*
+	 * Loading a collection sets every filter's saved enabled state, which
+	 * fires "enable": the keys stay unbound until the load is over.
+	 * CLEANUP comes before every load and, on quit, before EXIT; releasing
+	 * the filters there lets OBS free them with the rest of the scene.
+	 */
+	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGING:
+	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_CLEANUP:
+		keysReady = false;
+		unbindKeys();
+		keysLogged.clear();
+		break;
+
+	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED:
+		keysReady = true;
+		bindKeys();
 		break;
 
 	case OBS_FRONTEND_EVENT_EXIT:
