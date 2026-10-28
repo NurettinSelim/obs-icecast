@@ -36,7 +36,7 @@ the copies already inside `OBS.app`, which is why the OBS major matters.
 ```bash
 mkdir -p ~/Library/Application\ Support/obs-studio/plugins
 
-unzip -o ~/Downloads/obs-icecast-1.3.0-arm64.zip \
+unzip -o ~/Downloads/obs-icecast-1.4.0-arm64.zip \
       -d ~/Library/Application\ Support/obs-studio/plugins/
 
 xattr -dr com.apple.quarantine \
@@ -232,8 +232,45 @@ start and stop the broadcast without the dock.
   example `[{"key": "OBS_KEY_1", "control": true, "alt": true, "command": true,
   "shift": true}]`. They are written on OBS exit and on every dock change, so a
   binding set in Settings → Hotkeys is lost if OBS crashes before either.
+- Disconnect also cancels a connect still in progress (since 1.4.0); before,
+  libobs ignored it and the station went live anyway.
 - Every press is logged: `[obs-icecast] hotkey: connect (connecting)`, and at
   startup `[obs-icecast] hotkeys loaded: connect 1, disconnect 1 binding(s)`.
+- A hotkey is a keystroke, so a text field with keyboard focus (a chat dock,
+  the Stream name field) takes it and OBS never sees it. Filter keys (below)
+  do not have that problem.
+
+---
+
+## Stream Deck filter keys
+
+Since 1.4.0 the plugin also listens to two filters on a source named
+**Stream Deck Tuşları**:
+
+| Filter | Does |
+|---|---|
+| **Radyo Başlat** | the same as Radio.co: Connect |
+| **Radyo Durdur** | the same as Radio.co: Disconnect |
+
+A Stream Deck button with the Elgato OBS plugin's **Filter** action toggles the
+filter. Every toggle is a press, on or off, so the filter's current state does
+not matter. Unlike a hotkey this works whatever has keyboard focus.
+
+Setup: add any source (a 2×2 color source works), name it exactly
+`Stream Deck Tuşları`, hide it in a scene, and give it two filters of any kind
+(Color Correction is fine) named exactly `Radyo Başlat` and `Radyo Durdur`.
+Point each button's Filter action at that source and filter.
+
+- Names are matched exactly and checked every second, so filters added,
+  renamed or removed while OBS runs are picked up without a restart.
+- The log says what is bound whenever it changes:
+  `[obs-icecast] radio keys bound: Radyo Başlat, Radyo Durdur`, or
+  `radio keys: no source "Stream Deck Tuşları"; hotkeys only`.
+- Each press is logged like a hotkey, e.g.
+  `[obs-icecast] key Radyo Durdur: disconnect (cancelling the connect)`.
+- Clicking a key filter's eye icon in OBS is a press too.
+- Loading a scene collection restores the filters' saved states without
+  pressing anything.
 
 ---
 
@@ -298,7 +335,7 @@ codesign --force --sign - --identifier io.github.nurettinselim.obs-icecast \
          --timestamp=none build/obs-icecast.plugin
 
 ditto -c -k --keepParent build/obs-icecast.plugin \
-      obs-icecast-1.3.0-arm64.zip
+      obs-icecast-1.4.0-arm64.zip
 ```
 
 `simde` is needed because `libobs`'s SSE-intrinsics header pulls in
@@ -329,6 +366,10 @@ keeps using the old ones.
 | Connects, shows `● Live`, then `send failed: Resource temporarily unavailable` after ~20 s | **Wrong endpoint.** The server authenticated you but is not consuming audio, so the socket buffer fills and `send()` times out. Radio.co's `.dj.radio.co` Icecast harbor does exactly this. Switch to SHOUTcast v1 against the host in your dashboard (`maple.radio.co`-style). Details in [`docs/FINDINGS.md`](docs/FINDINGS.md) §3.6. |
 | SHOUTcast v1 never completes the handshake | You are on the admin port. SHOUTcast v1 sources connect on **port + 1**; the plugin applies this automatically, so enter the base port (e.g. `4192`), not `4193`. |
 | Connects and shows `● Live`, but the station stays `automated` | The stream is arriving but the station is not accepting it: "Live Anytime" is disabled, or no event is scheduled in the dashboard. butt reports the same condition at `src/shoutcast.cpp:189-191`. |
+| A Stream Deck Hotkey button does nothing while typing in a dock | The focused text field took the keystroke. Use [filter keys](#stream-deck-filter-keys) instead. |
+| A filter key does nothing | Check the log for `radio keys bound: …`. Names must match exactly, including `ş` and `ı`. |
+| `[icecast] connect cancelled` in the log | Disconnect was pressed while connecting; nothing went on air. |
+| `Failed to connect to …: Operation timed out` | The server did not answer within 10 s (since 1.4.0; before, the OS waited over a minute). Check the server address and the network. |
 | Metadata returns `200` but the title never changes | Titles only land while the source is actually live — which makes this a handy liveness check. Confirm `source.type` is `live` first. |
 | `radio.co ✗ not set` on the title line | Four attempts got no answer or a server error. The tooltip and the log (`[obs-icecast] radio.co title failed: …`) give the reason; press **Update** once the network is back. |
 | `Kick ✗ sign in again (gear)` | Kick no longer accepts the stored sign-in. Gear → **Connect Kick**, sign in as the channel. |
