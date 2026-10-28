@@ -130,8 +130,10 @@ No `charset` parameter is sent — plain percent-encoded UTF-8 round-tripped
 correctly against the live server. butt's optional one is
 `butt-1.46.0/src/icecast.cpp:558-564` if it is ever needed.
 
-Updates are de-duplicated: an identical title applied twice opens only one
-socket.
+Since 1.3.0 updates are **not** de-duplicated: every **Update** press sends,
+so pressing it again is the retry after a failure. Titles go out from the
+dock's `TitleSync` worker rather than the output's `update` callback, with
+retries after 5, 10 and 20 s when the server gave no usable answer (§8).
 
 ---
 
@@ -709,3 +711,65 @@ part that catches the §4.1 class of bug; measuring volume is what catches
 dock's in-memory state, so an edit made while OBS is running is discarded at
 quit and the next launch comes up on the previous config — pointed at
 production.
+
+---
+
+## 8. Titles to radio.co and Kick (1.3.0)
+
+### 8.1 Kick API, as verified on 2026-10-28
+
+Against docs.kick.com (OAuth 2.1, Scopes, Channels pages) and the live
+endpoints:
+
+- Authorize: `GET https://id.kick.com/oauth/authorize` with `response_type=code`,
+  `client_id`, `redirect_uri`, `scope`, `code_challenge`,
+  `code_challenge_method=S256`, `state` (state is required "at the moment").
+- Token: `POST https://id.kick.com/oauth/token`, form-encoded. The code
+  exchange **and** every refresh require `client_secret` even with PKCE.
+  A refresh returns a new access **and** refresh token.
+- Title: `PATCH https://api.kick.com/public/v1/channels`, JSON
+  `{"stream_title": "…"}` (`minLength` 1), `204 No Content`, user token with
+  scope `channel:write`. `GET` on the same path with no parameters returns the
+  token owner's channel (`slug`, `stream_title`) with `channel:read`.
+- Redirect URI: the docs recommend `localhost`; their frontend rewrites the
+  first `127.0.0.1` in the authorize URL.
+
+Measured with an invalid token or client:
+
+| Request | Answer |
+|---|---|
+| `PATCH /public/v1/channels`, bogus bearer | `401`, `{"message":"Unauthorized"}` |
+| `GET /public/v1/channels`, bogus bearer | `401`, `{"message":"Unauthorized"}` |
+| refresh with bogus client and token | `401`, `error_description` "The provided authorization grant … is invalid, expired, revoked …" |
+| any request with the abort flag already set | no HTTP answer, `cancelled` within the first progress tick |
+
+So a refusal of the refresh token is a `401`, not the `400` OAuth suggests;
+the plugin treats any non-5xx refresh failure as "sign in again".
+
+### 8.2 Loopback sign-in listener
+
+A self-test linked against `OBS.app`'s libobs drove `kick_auth_*` directly:
+
+| Case | Result |
+|---|---|
+| Authorize URL | `client_id`, `redirect_uri`, `scope` URL-encoded; `code_challenge` = base64url(SHA-256(verifier)), verifier 43 chars |
+| `GET /favicon.ico` over IPv6 `localhost` | `404`, listener keeps waiting |
+| `GET /callback?code=abc%2Bdef&state=<ours>` over IPv4 | `200` page, code returned decoded as `abc+def` |
+| wrong `state` | error "did not match this request", no code |
+| `error=access_denied` with our state | error "Kick did not grant access (access_denied)" |
+| second listener on the same port | "Port 51934 is busy (Address already in use)" before any browser opens |
+| a connection that sends nothing, then a real callback | real callback served after the 5 s receive timeout (4.7 s measured) |
+| keychain set, update, get, has, delete | round-trips UTF-8, `has` false after delete |
+
+### 8.3 Title retries against the local sink
+
+OBS 32.2.1 on the development Mac, plugin 1.3.0, a fake Icecast server on
+`127.0.0.1:9099` whose `/admin/metadata` answer was scripted per run. Connect
+and Disconnect via the plugin's hotkeys over obs-websocket:
+
+| Run | Server | Observed |
+|---|---|---|
+| fail twice, then OK | `500`, `500`, `200` | title sent 15.0 s after `streaming started`; retries logged `1/3 in 5 s`, `2/3 in 10 s`; third attempt `[icy] metadata updated` — sink timestamps 41, 46, 56 s |
+| always `500` | four `500`s | attempts at +0, +5, +15, +35 s, then `radio.co title failed: Metadata update rejected (HTTP 500)`; audio unaffected (1,105,920 B on the previous connection) |
+| close without answering | no response | `No response to metadata update` → retry; Disconnect during the 5 s wait → `radio.co title not sent: off air`, no further request |
+| quit OBS during a retry wait | — | OBS gone 1.5 s after the quit, `plugin unloaded`, `Number of memory leaks: 0` |

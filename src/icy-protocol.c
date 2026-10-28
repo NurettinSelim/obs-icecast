@@ -444,7 +444,7 @@ int icy_update_metadata(const struct icy_params *params, const char *song,
 {
 	if (!song || !*song) {
 		snprintf(error_buf, error_len, "No song text to send");
-		return -1;
+		return -2;
 	}
 
 	char request[2048];
@@ -497,7 +497,7 @@ int icy_update_metadata(const struct icy_params *params, const char *song,
 
 	if (!ok) {
 		snprintf(error_buf, error_len, "Metadata request too large");
-		return -1;
+		return -2;
 	}
 
 	int sock_fd = icy_tcp_connect(params->server, params->port, error_buf,
@@ -528,7 +528,8 @@ int icy_update_metadata(const struct icy_params *params, const char *song,
 	if (status != 200) {
 		snprintf(error_buf, error_len,
 			 "Metadata update rejected (HTTP %d)", status);
-		return -1;
+		/* A 5xx is the server's trouble, not the request's. */
+		return status >= 500 ? -1 : -2;
 	}
 
 	return 0;
