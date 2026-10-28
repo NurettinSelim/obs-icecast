@@ -521,15 +521,26 @@ TitleSync::Attempt TitleSync::kickAttempt(const std::string &title)
 	}
 	kick_response_free(&resp);
 
-	/* Read the title back so the log shows what viewers actually see. */
+	/*
+	 * Read the title back so the log shows what viewers see. Kick reports
+	 * stream_title only for a live stream; offline it is empty although
+	 * the title is kept for the next one (checked in Kick's dashboard).
+	 */
 	if (result.outcome == Outcome::Ok) {
 		kick_get_channel(accessToken.c_str(), &requestAbort, &resp);
 		char *slug = nullptr, *now = nullptr;
 		if (resp.status == 200 &&
-		    kick_parse_channel(resp.body, &slug, &now))
-			blog(LOG_INFO,
-			     "[obs-icecast] kick: %s now shows: %s", slug,
-			     now ? now : "");
+		    kick_parse_channel(resp.body, &slug, &now)) {
+			if (now && *now)
+				blog(LOG_INFO,
+				     "[obs-icecast] kick: %s now shows: %s",
+				     slug, now);
+			else
+				blog(LOG_INFO,
+				     "[obs-icecast] kick: %s is offline; the "
+				     "title is kept for the next stream",
+				     slug);
+		}
 		bfree(slug);
 		bfree(now);
 		kick_response_free(&resp);
@@ -663,9 +674,9 @@ void TitleSync::runKickConnect(kick_auth *auth, std::string clientId)
 		slug = QString::fromUtf8(s);
 	kick_response_free(&resp);
 
-	/* The title as found, so a test can put it back. */
-	blog(LOG_INFO, "[obs-icecast] kick: connected as %s (title now: %s)",
-	     slug.toUtf8().constData(), title ? title : "");
+	/* The live title as found (empty while offline). */
+	blog(LOG_INFO, "[obs-icecast] kick: connected as %s (live title: %s)",
+	     slug.toUtf8().constData(), title && *title ? title : "offline");
 	bfree(s);
 	bfree(title);
 	emit kickConnectFinished(true, slug);

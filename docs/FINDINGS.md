@@ -746,6 +746,13 @@ Measured with an invalid token or client:
 So a refusal of the refresh token is a `401`, not the `400` OAuth suggests;
 the plugin treats any non-5xx refresh failure as "sign in again".
 
+With the station's real app and a radyozu sign-in (Selim's Mac, channel
+offline): the code exchange succeeded, two `PATCH`es returned `204`, and the
+creator dashboard then showed the second title. `GET /public/v1/channels`
+returned an **empty `stream_title` both before and after** — it reports the
+live stream's title only. An offline `PATCH` is therefore not lost; it is the
+title the next stream starts with.
+
 ### 8.2 Loopback sign-in listener
 
 A self-test linked against `OBS.app`'s libobs drove `kick_auth_*` directly:

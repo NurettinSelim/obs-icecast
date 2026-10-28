@@ -279,6 +279,10 @@ viewers see:
 [obs-icecast] kick: radyozu now shows: Kahve & Sohbet
 ```
 
+Offline, Kick's API reports no title at all, but it keeps the one that was
+set and uses it for the next stream (the creator dashboard shows it). The log
+then says `radyozu is offline; the title is kept for the next stream`.
+
 ---
 
 ## Build from source
