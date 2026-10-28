@@ -661,11 +661,12 @@ void TitleSync::runKickConnect(kick_auth *auth, std::string clientId)
 	char *s = nullptr, *title = nullptr;
 	if (resp.status == 200 && kick_parse_channel(resp.body, &s, &title))
 		slug = QString::fromUtf8(s);
-	bfree(s);
-	bfree(title);
 	kick_response_free(&resp);
 
-	blog(LOG_INFO, "[obs-icecast] kick: connected as %s",
-	     slug.toUtf8().constData());
+	/* The title as found, so a test can put it back. */
+	blog(LOG_INFO, "[obs-icecast] kick: connected as %s (title now: %s)",
+	     slug.toUtf8().constData(), title ? title : "");
+	bfree(s);
+	bfree(title);
 	emit kickConnectFinished(true, slug);
 }
