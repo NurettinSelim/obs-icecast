@@ -780,3 +780,93 @@ and Disconnect via the plugin's hotkeys over obs-websocket:
 | always `500` | four `500`s | attempts at +0, +5, +15, +35 s, then `radio.co title failed: Metadata update rejected (HTTP 500)`; audio unaffected (1,105,920 B on the previous connection) |
 | close without answering | no response | `No response to metadata update` → retry; Disconnect during the 5 s wait → `radio.co title not sent: off air`, no further request |
 | quit OBS during a retry wait | — | OBS gone 1.5 s after the quit, `plugin unloaded`, `Number of memory leaks: 0` |
+
+---
+
+## 9. Disconnect while connecting, Stream Deck filter keys (1.4.0)
+
+### 9.1 Why a Disconnect during the handshake was lost
+
+Studio iMac, 28.10.2026 (1.3.0): `18:07:56.605 hotkey: connect (connecting)`,
+`18:07:56.921 hotkey: disconnect (disconnecting)`, `18:07:56.962 [icy]
+connected … [icecast] streaming started`, and the station stayed on air until
+18:10:20.
+
+libobs 32.2.1 `obs_output_stop` (`libobs/obs-output.c:530`) returns at once
+unless the output is `active` or `reconnecting`. `active` turns true only in
+`obs_output_begin_data_capture`, which this plugin calls from its connect
+thread after the handshake. So between Connect and the server's answer,
+`obs_output_stop` was a no-op: `icecast_stop` never ran, the stop flag was
+never set, and the connect went live.
+
+`obs_output_force_stop` has no such check: it calls the output's `stop`
+callback, and `obs_output_end_data_capture` on a never-active output emits
+`stop` with code 0 (`obs-output.c:2875`), so the dock sees a normal stop. The
+dock now uses it for an output that is not yet active.
+
+`icecast_stop` joins the connect thread, so the connect itself had to become
+interruptible, or the join would block the UI thread for the whole connect (the
+OS default for a blocking `connect()` to a silent host is over a minute). The
+TCP connect now runs non-blocking, and both it and the wait for the server's
+handshake answer poll in 100 ms slices that check the stop flag, with a 10 s
+limit each. Name resolution (`getaddrinfo`) is still blocking.
+
+The same path had a use-after-free: `obs_output_destroy` stops only `active`
+outputs (`obs-output.c:298`), so quitting OBS during a connect freed the
+output's data while the connect thread still used it. `icecast_destroy` now
+sets the stop flag and joins the thread.
+
+A disconnect logs `[icecast] streaming stopped` twice, in 1.4.0 and in every
+earlier log checked back to 07.09.2026: libobs calls `stop` again from
+`obs_output_destroy` while the end-of-capture thread has not yet cleared
+`active`. Harmless.
+
+### 9.2 `icy_connect` harness
+
+Linked against `OBS.app`'s libobs; the abort flag set from a second thread:
+
+| Target | Abort | Result |
+|---|---|---|
+| local sink, answers | — | connected in 0.00 s |
+| local sink, accepts but never answers | after 300 ms | `Connect cancelled` after 0.30 s |
+| local sink, never answers | — | `No response from server …` after 10.10 s |
+| `127.0.0.1:9` (closed) | — | `Connection refused` after 0.00 s |
+| `192.0.2.1:8000` (no route answers) | after 300 ms | `Connect cancelled` after 0.31 s |
+| `192.0.2.1:8000` | — | `Operation timed out` after 10.11 s |
+| `icy_update_metadata` to the sink | — | `0` |
+
+### 9.3 Filter keys
+
+- `obs_source_set_enabled` (`libobs/obs-source.c:5008`) emits `enable` on
+  every call, also when the state does not change, so a key fires on every
+  toggle and on an "on" press of an already enabled filter.
+- Loading a collection calls `obs_source_set_enabled` with the saved state
+  (`libobs/obs.c:2324`) before the filter is added to its source. Keys are
+  bound only after `FINISHED_LOADING` / `SCENE_COLLECTION_CHANGED` and
+  released on `SCENE_COLLECTION_CHANGING` / `SCENE_COLLECTION_CLEANUP`.
+  `OBSBasic::LoadData` clears the scene (and sends `CLEANUP`) before every
+  load, and on quit `CLEANUP` comes before `EXIT`.
+- Filters loaded from a collection are private (`obs_load_source_type(…,
+  true)`), and `obs_source_set_name` emits the global `source_rename` only for
+  public sources, so a renamed filter is not announced. The dock re-checks the
+  binding by name every second instead.
+
+### 9.4 Real-app results
+
+OBS 32.2.1 on the development Mac, the local sink, keys toggled with
+obs-websocket `SetSourceFilterEnabled` (the call the Elgato plugin makes):
+
+| Run | Observed |
+|---|---|
+| no key source | `radio keys: no source "Stream Deck Tuşları"; hotkeys only` |
+| source, then each filter created live | log follows: no filter → `bound: Radyo Başlat` → `bound: Radyo Başlat, Radyo Durdur`; creating them pressed nothing |
+| Başlat off, on; Durdur off, on | connect; `already connected, ignored`; disconnect; `not connected, ignored` |
+| Başlat, then Durdur 400 ms later, sink answering after 3 s | `cancelling the connect`, `[icecast] connect cancelled` 5 ms later, never live |
+| hotkeys 316 ms apart (the 18:07 timing), same sink | cancelled 87 ms after the Disconnect, never live |
+| sink that never answers, Disconnect after 2 s | cancelled after 18 ms |
+| filter renamed away and back, filter removed and re-added, source renamed away and back | rebound within 1 s each time, logged |
+| switch to an empty collection and back | `no source`, then `bound` again; the load pressed nothing |
+| sink killed while live, Disconnect during the reconnect wait | reconnect attempts logged, then stopped |
+| sink killed while live, restarted after 2.5 s | reconnected, streaming again |
+| quit OBS during a connect that never gets an answer | `connect cancelled`, OBS gone 0.8 s after the quit, `Number of memory leaks: 0` |
+

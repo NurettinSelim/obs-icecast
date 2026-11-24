@@ -49,6 +49,7 @@
 #include <QElapsedTimer>
 #include <QMetaObject>
 #include <QPointer>
+#include <QThread>
 #include <QIcon>
 #include <QPixmap>
 #include <QPainter>
@@ -69,6 +70,16 @@
  * silently dropped. 15 s is comfortably past that switch.
  */
 #define RADIO_TITLE_DELAY_MS 15000
+
+/*
+ * Stream Deck keys that work whatever has keyboard focus: filters on a hidden
+ * source, toggled by the Elgato OBS plugin's Filter action. Every toggle is a
+ * press, on or off: libobs signals "enable" on each obs_source_set_enabled.
+ * The same source carries the break timer script's keys (mola-sayaci.lua).
+ */
+#define KEY_SOURCE "Stream Deck Tuşları"
+#define KEY_CONNECT "Radyo Başlat"
+#define KEY_DISCONNECT "Radyo Durdur"
 
 /* ------------------------------------------------------------------ */
 
@@ -227,14 +238,15 @@ public:
 
 	void handleFrontendEvent(obs_frontend_event event);
 	void shutdownOutput();
+	void setStreamNameFrom(const QString &name, const QString &from);
 
 public slots:
 	void onOutputStarted();
 	void onOutputStopped(int code);
 	void onOutputReconnecting();
 	void onOutputReconnected();
-	void onHotkeyConnect();
-	void onHotkeyDisconnect();
+	void onKeyConnect(const QString &via);
+	void onKeyDisconnect(const QString &via);
 	void onTitleStatus(int dest, int state, int attempt,
 			   const QString &detail);
 	void onKickConnectFinished(bool ok, const QString &text);
@@ -255,6 +267,8 @@ private:
 	void startOutput(bool asAutoStart);
 	void stopOutput();
 	void releaseOutput();
+	void bindKeys();
+	void unbindKeys();
 	void buildSettingsDialog();
 	void loadSettings();
 	void saveSettings();
@@ -322,6 +336,15 @@ private:
 	obs_hotkey_id connectHotkey = OBS_INVALID_HOTKEY_ID;
 	obs_hotkey_id disconnectHotkey = OBS_INVALID_HOTKEY_ID;
 
+	/*
+	 * The bound filter keys, held by reference: their signal handlers
+	 * must outlive the connection made on them.
+	 */
+	obs_source_t *keyConnectFilter = nullptr;
+	obs_source_t *keyDisconnectFilter = nullptr;
+	bool keysReady = false; /* a scene collection is fully loaded */
+	QString keysLogged;     /* last binding logged */
+
 	QElapsedTimer liveTimer;
 	QString connectedName;
 	bool pendingRestart = false;
@@ -387,8 +410,9 @@ static void hotkey_connect(void *data, obs_hotkey_id id, obs_hotkey_t *key,
 	UNUSED_PARAMETER(key);
 	if (pressed)
 		QMetaObject::invokeMethod(static_cast<RadioCoDock *>(data),
-					  "onHotkeyConnect",
-					  Qt::QueuedConnection);
+					  "onKeyConnect", Qt::QueuedConnection,
+					  Q_ARG(QString,
+						QStringLiteral("hotkey")));
 }
 
 static void hotkey_disconnect(void *data, obs_hotkey_id id, obs_hotkey_t *key,
@@ -398,8 +422,33 @@ static void hotkey_disconnect(void *data, obs_hotkey_id id, obs_hotkey_t *key,
 	UNUSED_PARAMETER(key);
 	if (pressed)
 		QMetaObject::invokeMethod(static_cast<RadioCoDock *>(data),
-					  "onHotkeyDisconnect",
-					  Qt::QueuedConnection);
+					  "onKeyDisconnect",
+					  Qt::QueuedConnection,
+					  Q_ARG(QString,
+						QStringLiteral("hotkey")));
+}
+
+/*
+ * A filter key's "enable" signal fires on whichever thread toggled it: the
+ * Elgato plugin's RPC thread for a Stream Deck press, the UI thread for a
+ * click on the filter's eye icon.
+ */
+static void filter_key_connect(void *data, calldata_t *cd)
+{
+	UNUSED_PARAMETER(cd);
+	QMetaObject::invokeMethod(static_cast<RadioCoDock *>(data),
+				  "onKeyConnect", Qt::QueuedConnection,
+				  Q_ARG(QString, QStringLiteral(
+							 "key " KEY_CONNECT)));
+}
+
+static void filter_key_disconnect(void *data, calldata_t *cd)
+{
+	UNUSED_PARAMETER(cd);
+	QMetaObject::invokeMethod(static_cast<RadioCoDock *>(data),
+				  "onKeyDisconnect", Qt::QueuedConnection,
+				  Q_ARG(QString, QStringLiteral(
+							 "key " KEY_DISCONNECT)));
 }
 
 /* ------------------------------------------------------------------ */
@@ -492,6 +541,14 @@ void RadioCoDock::buildSettingsDialog()
 	trackInfoLabel->setWordWrap(true);
 	form->addRow(QString(), trackInfoLabel);
 
+	followObsBox = new QCheckBox(
+		QStringLiteral("Connect with OBS \"Start Streaming\""),
+		settingsDialog);
+	followObsBox->setChecked(false);
+	followObsBox->setToolTip(QStringLiteral(
+		"Also connect this audio stream when OBS starts streaming video."));
+	form->addRow(QString(), followObsBox);
+
 	layout->addLayout(form);
 
 	/*
@@ -504,6 +561,15 @@ void RadioCoDock::buildSettingsDialog()
 					settingsDialog);
 	auto *kickForm = new QFormLayout(kickGroup);
 	kickForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+
+	/* Hidden until a Kick account is connected. */
+	kickTitleBox = new QCheckBox(QStringLiteral("Also set the Kick title"),
+				     kickGroup);
+	kickTitleBox->setChecked(true);
+	kickTitleBox->setToolTip(QStringLiteral(
+		"Update sends the stream name to Kick too, and it is sent "
+		"when OBS starts streaming."));
+	kickForm->addRow(QString(), kickTitleBox);
 
 	kickClientIdEdit = new QLineEdit(kickGroup);
 	kickForm->addRow(QStringLiteral("Client ID"), kickClientIdEdit);
@@ -572,54 +638,37 @@ RadioCoDock::RadioCoDock(QWidget *parent) : QWidget(parent)
 
 	buildSettingsDialog();
 
+	/*
+	 * Two rows: the Stream name with Update, then Connect, the status, the
+	 * title outcome and the gear. The two checkboxes that are set once per
+	 * station (Kick title, follow OBS) live in the settings dialog since
+	 * 1.5.0; the silent-track warning still appears here when it applies.
+	 */
 	auto *root = new QVBoxLayout(this);
 
-	auto *form = new QFormLayout();
-	form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
-	form->setRowWrapPolicy(QFormLayout::WrapLongRows);
-
 	nowPlayingEdit = new QLineEdit(this);
+	nowPlayingEdit->setPlaceholderText(QStringLiteral("Show name"));
 	updateButton = new QPushButton(QStringLiteral("Update"), this);
 	updateButton->setEnabled(false);
 	auto *songRow = new QHBoxLayout();
 	songRow->setContentsMargins(0, 0, 0, 0);
+	songRow->addWidget(new QLabel(QStringLiteral("Stream name"), this));
 	songRow->addWidget(nowPlayingEdit, 1);
 	songRow->addWidget(updateButton);
-	form->addRow(QStringLiteral("Stream name"), songRow);
-
-	root->addLayout(form);
-
-	/* Hidden until a Kick account is connected in the settings dialog. */
-	kickTitleBox = new QCheckBox(QStringLiteral("Also set the Kick title"),
-				     this);
-	kickTitleBox->setChecked(true);
-	kickTitleBox->setToolTip(QStringLiteral(
-		"Update sends the stream name to Kick too, and it is sent "
-		"when OBS starts streaming."));
-	root->addWidget(kickTitleBox);
-
-	titleStatusLabel = new QLabel(this);
-	titleStatusLabel->setTextFormat(Qt::RichText);
-	titleStatusLabel->setWordWrap(true);
-	titleStatusLabel->setVisible(false);
-	root->addWidget(titleStatusLabel);
-
-	followObsBox = new QCheckBox(
-		QStringLiteral("Connect with OBS \"Start Streaming\""), this);
-	followObsBox->setChecked(false);
-	followObsBox->setToolTip(QStringLiteral(
-		"Also connect this audio stream when OBS starts streaming video."));
-	root->addWidget(followObsBox);
+	root->addLayout(songRow);
 
 	silentWarnLabel = new QLabel(this);
 	silentWarnLabel->setWordWrap(true);
 	silentWarnLabel->setVisible(false);
-	root->addWidget(silentWarnLabel);
 
 	auto *bottom = new QHBoxLayout();
 	connectButton = new QPushButton(QStringLiteral("Connect"), this);
 	statusLabel = new QLabel(QStringLiteral("Idle"), this);
 	statusLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+	/* radio.co ✓ · Kick ✓ — short; times and errors are in its tooltip */
+	titleStatusLabel = new QLabel(this);
+	titleStatusLabel->setTextFormat(Qt::RichText);
+	titleStatusLabel->setVisible(false);
 	settingsButton = new QPushButton(this);
 	settingsButton->setIcon(make_gear_icon(
 		palette().color(QPalette::WindowText)));
@@ -630,8 +679,10 @@ RadioCoDock::RadioCoDock(QWidget *parent) : QWidget(parent)
 	settingsButton->setAccessibleName(QStringLiteral("Settings"));
 	bottom->addWidget(connectButton);
 	bottom->addWidget(statusLabel, 1);
+	bottom->addWidget(titleStatusLabel);
 	bottom->addWidget(settingsButton);
 	root->addLayout(bottom);
+	root->addWidget(silentWarnLabel);
 
 	root->addStretch(1);
 
@@ -709,6 +760,7 @@ RadioCoDock::~RadioCoDock()
 	if (tickTimer)
 		tickTimer->stop();
 	releaseOutput();
+	unbindKeys();
 	if (connectHotkey != OBS_INVALID_HOTKEY_ID)
 		obs_hotkey_unregister(connectHotkey);
 	if (disconnectHotkey != OBS_INVALID_HOTKEY_ID)
@@ -823,11 +875,25 @@ void RadioCoDock::startOutput(bool asAutoStart)
 	refreshControls();
 }
 
+/*
+ * obs_output_stop ignores an output that is still connecting (libobs stops
+ * only active or reconnecting ones), so a Disconnect pressed then was lost
+ * and the radio went live anyway. force_stop always reaches icecast_stop,
+ * which aborts the connect; the "stop" signal follows as usual.
+ */
+static void stop_or_abort(obs_output_t *output)
+{
+	if (obs_output_active(output))
+		obs_output_stop(output);
+	else
+		obs_output_force_stop(output);
+}
+
 void RadioCoDock::stopOutput()
 {
 	if (!output)
 		return;
-	obs_output_stop(output);
+	stop_or_abort(output);
 	setStatus(QStringLiteral("Disconnecting…"), StatusKind::Busy);
 }
 
@@ -844,8 +910,11 @@ void RadioCoDock::shutdownOutput()
 	if (tickTimer)
 		tickTimer->stop();
 
+	keysReady = false;
+	unbindKeys();
+
 	if (output) {
-		obs_output_stop(output);
+		stop_or_abort(output);
 		releaseOutput();
 	}
 
@@ -889,26 +958,116 @@ void RadioCoDock::onConnectClicked()
 }
 
 /*
- * A hotkey start counts as manual, like the Connect button: stopping the OBS
- * stream later leaves it on air even when "Connect with OBS Start Streaming"
- * is ticked.
+ * Hotkeys and Stream Deck filter keys. A key start counts as manual, like the
+ * Connect button: stopping the OBS stream later leaves it on air even when
+ * "Connect with OBS Start Streaming" is ticked.
  */
-void RadioCoDock::onHotkeyConnect()
+void RadioCoDock::onKeyConnect(const QString &via)
 {
-	blog(LOG_INFO, "[obs-icecast] hotkey: connect (%s)",
+	blog(LOG_INFO, "[obs-icecast] %s: connect (%s)",
+	     via.toUtf8().constData(),
 	     output ? "already connected, ignored" : "connecting");
 	if (shuttingDown || output)
 		return;
 	startOutput(false);
 }
 
-void RadioCoDock::onHotkeyDisconnect()
+void RadioCoDock::onKeyDisconnect(const QString &via)
 {
-	blog(LOG_INFO, "[obs-icecast] hotkey: disconnect (%s)",
-	     output ? "disconnecting" : "not connected, ignored");
+	blog(LOG_INFO, "[obs-icecast] %s: disconnect (%s)",
+	     via.toUtf8().constData(),
+	     !output                    ? "not connected, ignored"
+	     : obs_output_active(output) ? "disconnecting"
+					 : "cancelling the connect");
 	if (shuttingDown || !output)
 		return;
 	stopOutput();
+}
+
+/*
+ * Finds the filter keys by name. Runs once the scene collection has loaded
+ * and then every second from onTick, so keys added, renamed or removed later
+ * need no restart: filters loaded from a collection are private sources, so
+ * no global signal reports their renames. Rebinds and logs only when the
+ * result changes.
+ */
+void RadioCoDock::bindKeys()
+{
+	if (!keysReady || shuttingDown) {
+		unbindKeys();
+		return;
+	}
+
+	obs_source_t *source = obs_get_source_by_name(KEY_SOURCE);
+	const bool found = source && !obs_source_removed(source);
+	obs_source_t *connectFilter =
+		found ? obs_source_get_filter_by_name(source, KEY_CONNECT)
+		      : nullptr;
+	obs_source_t *disconnectFilter =
+		found ? obs_source_get_filter_by_name(source, KEY_DISCONNECT)
+		      : nullptr;
+	obs_source_release(source);
+
+	if (connectFilter == keyConnectFilter &&
+	    disconnectFilter == keyDisconnectFilter) {
+		obs_source_release(connectFilter);
+		obs_source_release(disconnectFilter);
+	} else {
+		unbindKeys();
+		keyConnectFilter = connectFilter;
+		keyDisconnectFilter = disconnectFilter;
+		if (keyConnectFilter)
+			signal_handler_connect(
+				obs_source_get_signal_handler(keyConnectFilter),
+				"enable", filter_key_connect, this);
+		if (keyDisconnectFilter)
+			signal_handler_connect(obs_source_get_signal_handler(
+						       keyDisconnectFilter),
+					       "enable", filter_key_disconnect,
+					       this);
+	}
+
+	QStringList bound;
+	if (keyConnectFilter)
+		bound << QStringLiteral(KEY_CONNECT);
+	if (keyDisconnectFilter)
+		bound << QStringLiteral(KEY_DISCONNECT);
+
+	QString state;
+	if (!bound.isEmpty())
+		state = QStringLiteral("radio keys bound: ") +
+			bound.join(QStringLiteral(", "));
+	else if (found)
+		state = QStringLiteral("radio keys: no \"" KEY_CONNECT
+				       "\" or \"" KEY_DISCONNECT
+				       "\" filter on \"" KEY_SOURCE
+				       "\"; hotkeys only");
+	else
+		state = QStringLiteral("radio keys: no source \"" KEY_SOURCE
+				       "\"; hotkeys only");
+
+	if (state != keysLogged) {
+		keysLogged = state;
+		blog(LOG_INFO, "[obs-icecast] %s", state.toUtf8().constData());
+	}
+}
+
+void RadioCoDock::unbindKeys()
+{
+	if (keyConnectFilter) {
+		signal_handler_disconnect(
+			obs_source_get_signal_handler(keyConnectFilter),
+			"enable", filter_key_connect, this);
+		obs_source_release(keyConnectFilter);
+		keyConnectFilter = nullptr;
+	}
+	if (keyDisconnectFilter) {
+		signal_handler_disconnect(
+			obs_source_get_signal_handler(keyDisconnectFilter),
+			"enable", filter_key_disconnect, this);
+		obs_source_release(keyDisconnectFilter);
+		keyDisconnectFilter = nullptr;
+	}
 }
 
 /*
@@ -926,6 +1085,23 @@ void RadioCoDock::onUpdateClicked()
 		sendRadioTitle("Update");
 	if (kickEnabled())
 		titles->sendKick(song);
+}
+
+/*
+ * Another plugin set the show (radyoozu-overlay's show list, through the
+ * "radioco_set_stream_name" procedure below): put it in the field and do
+ * what Update does. Unchanged names are left alone, so nothing is resent.
+ */
+void RadioCoDock::setStreamNameFrom(const QString &name, const QString &from)
+{
+	const QString song = name.trimmed();
+	if (song.isEmpty() || song == nowPlayingEdit->text())
+		return;
+	nowPlayingEdit->setText(song); /* saves through onFieldChanged */
+	blog(LOG_INFO, "[obs-icecast] stream name set by %s: %s",
+	     from.isEmpty() ? "another plugin" : from.toUtf8().constData(),
+	     song.toUtf8().constData());
+	onUpdateClicked();
 }
 
 void RadioCoDock::sendRadioTitle(const char *why)
@@ -1033,6 +1209,8 @@ void RadioCoDock::onTick()
 {
 	if (shuttingDown)
 		return;
+
+	bindKeys();
 
 	if (output && obs_output_active(output)) {
 		const qint64 secs = liveTimer.isValid()
@@ -1225,6 +1403,26 @@ void RadioCoDock::handleFrontendEvent(obs_frontend_event event)
 		/* Only now is it safe to ask the frontend about outputs. */
 		frontend_ready = true;
 		updateTrackStatus();
+		keysReady = true;
+		bindKeys();
+		break;
+
+	/*
+	 * Loading a collection sets every filter's saved enabled state, which
+	 * fires "enable": the keys stay unbound until the load is over.
+	 * CLEANUP comes before every load and, on quit, before EXIT; releasing
+	 * the filters there lets OBS free them with the rest of the scene.
+	 */
+	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGING:
+	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_CLEANUP:
+		keysReady = false;
+		unbindKeys();
+		keysLogged.clear();
+		break;
+
+	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED:
+		keysReady = true;
+		bindKeys();
 		break;
 
 	case OBS_FRONTEND_EVENT_EXIT:
@@ -1466,36 +1664,45 @@ void RadioCoDock::renderTitleStatus()
 			continue;
 
 		const QString name = QString::fromLatin1(p.name);
-		QString text;
+		QString text, tip;
 		const char *color = nullptr;
 		switch ((TitleState)p.o->state) {
 		case TitleState::Sending:
-			text = QStringLiteral("%1: sending\u2026").arg(name);
+			text = QStringLiteral("%1 \u2026").arg(name);
+			tip = QStringLiteral("%1: sending").arg(name);
 			color = COLOR_BUSY;
 			break;
 		case TitleState::Done:
-			text = QStringLiteral("%1 \u2713 %2")
-				       .arg(name, p.o->at.toString(
-							  QStringLiteral("HH:mm")));
+			text = QStringLiteral("%1 \u2713").arg(name);
+			tip = QStringLiteral("%1: set at %2")
+				      .arg(name, p.o->at.toString(
+							 QStringLiteral("HH:mm")));
 			color = COLOR_LIVE;
 			break;
 		case TitleState::Retrying:
-			text = QStringLiteral("%1: retry %2/3\u2026")
+			text = QStringLiteral("%1 %2/3\u2026")
 				       .arg(name)
 				       .arg(p.o->attempt);
+			tip = QStringLiteral("%1: retry %2 of 3")
+				      .arg(name)
+				      .arg(p.o->attempt);
 			color = COLOR_BUSY;
 			break;
 		case TitleState::Failed:
-			text = QStringLiteral("%1 \u2717 not set").arg(name);
+			text = QStringLiteral("%1 \u2717").arg(name);
+			tip = QStringLiteral("%1: not set").arg(name);
 			color = COLOR_ERROR;
 			break;
 		case TitleState::NeedsSignIn:
-			text = QStringLiteral("%1 \u2717 sign in again (gear)")
-				       .arg(name);
+			text = QStringLiteral("%1 \u2717 sign in").arg(name);
+			tip = QStringLiteral("%1: sign in again in the gear's "
+					     "Kick title")
+				      .arg(name);
 			color = COLOR_ERROR;
 			break;
 		case TitleState::Dropped:
-			text = QStringLiteral("%1: not sent (off air)").arg(name);
+			text = QStringLiteral("%1 \u2013").arg(name);
+			tip = QStringLiteral("%1: not sent (off air)").arg(name);
 			break;
 		}
 
@@ -1504,6 +1711,7 @@ void RadioCoDock::renderTitleStatus()
 					  .arg(QLatin1String(color),
 					       text.toHtmlEscaped())
 				: text.toHtmlEscaped());
+		tips << tip;
 		if (!p.o->detail.isEmpty())
 			tips << QStringLiteral("%1: %2").arg(name, p.o->detail);
 	}
@@ -1580,6 +1788,38 @@ void RadioCoDock::onKickDisconnectClicked()
 /* C entry points                                                       */
 /* ------------------------------------------------------------------ */
 
+/*
+ * Global procedure for other plugins:
+ *   void radioco_set_stream_name(in string name, in string from, out bool ok)
+ * Sets the Stream name and sends it like Update. ok is false when the dock
+ * does not exist. Called on the UI thread it runs at once; from any other
+ * thread it is queued there. proc_handler has no remove, so the callback
+ * only goes through the QPointer and is harmless once the dock is gone.
+ */
+static void proc_set_stream_name(void *, calldata_t *cd)
+{
+	const char *name = calldata_string(cd, "name");
+	const char *from = calldata_string(cd, "from");
+	QPointer<RadioCoDock> d = dock;
+	if (!d || !name || !*name) {
+		calldata_set_bool(cd, "ok", false);
+		return;
+	}
+	const QString n = QString::fromUtf8(name);
+	const QString f = QString::fromUtf8(from ? from : "");
+	if (QThread::currentThread() == d->thread())
+		d->setStreamNameFrom(n, f);
+	else
+		QMetaObject::invokeMethod(
+			d.data(),
+			[d, n, f] {
+				if (d)
+					d->setStreamNameFrom(n, f);
+			},
+			Qt::QueuedConnection);
+	calldata_set_bool(cd, "ok", true);
+}
+
 static void frontend_event(enum obs_frontend_event event, void *private_data)
 {
 	auto *d = static_cast<RadioCoDock *>(private_data);
@@ -1604,6 +1844,15 @@ void radioco_dock_init(void)
 
 	obs_frontend_add_event_callback(frontend_event, dock);
 	blog(LOG_INFO, "[obs-icecast] " DOCK_TITLE " dock registered");
+
+	static bool procRegistered = false;
+	if (!procRegistered) {
+		proc_handler_add(obs_get_proc_handler(),
+				 "void radioco_set_stream_name(in string name, "
+				 "in string from, out bool ok)",
+				 proc_set_stream_name, nullptr);
+		procRegistered = true;
+	}
 }
 
 void radioco_dock_free(void)
