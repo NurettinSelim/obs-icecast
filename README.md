@@ -36,7 +36,7 @@ the copies already inside `OBS.app`, which is why the OBS major matters.
 ```bash
 mkdir -p ~/Library/Application\ Support/obs-studio/plugins
 
-unzip -o ~/Downloads/obs-icecast-1.4.0-arm64.zip \
+unzip -o ~/Downloads/obs-icecast-1.5.0-arm64.zip \
       -d ~/Library/Application\ Support/obs-studio/plugins/
 
 xattr -dr com.apple.quarantine \
@@ -56,11 +56,13 @@ is almost always this.
 
 Open **View → Docks → Radio.co**.
 
-The dock carries only what a broadcast needs: the **Stream name** field with
-**Update**, the **Also set the Kick title** checkbox (once Kick is connected),
-the title line, the OBS follow checkbox, **Connect**, and the status line.
-Everything that is set once per station sits behind the **gear button** at the
-right of the Connect row, which opens **Radio.co Settings**:
+The dock is two rows: the **Stream name** field with **Update**, then
+**Connect**, the status line, the short title line (`radio.co ✓ · Kick ✓`) and
+the **gear button**. Everything that is set once per station sits behind the
+gear, which opens **Radio.co Settings** — since 1.5.0 that includes the
+**Connect with OBS "Start Streaming"** checkbox and, once Kick is connected,
+**Also set the Kick title** in the Kick group. A warning row appears under
+the dock only when nothing is on air on the selected track:
 
 | Field | Notes |
 |---|---|
@@ -75,6 +77,7 @@ right of the Connect row, which opens **Radio.co Settings**:
 | Reconnect attempts | Failed reconnects before stopping; **20** by default, or **Off** to disable |
 | Reconnect delay | Initial delay between attempts, **1 s** by default; changes take effect on the next connect |
 | Audio track | Which OBS audio track feeds the stream: **Same as OBS stream** (the default) or a fixed Track 1–6. See the **Audio track** notes below |
+| Connect with OBS "Start Streaming" | See **Running alongside a video stream** below |
 | Kick title | Client ID, Client secret, the Redirect URL to register, and **Connect Kick**. See **Kick title** below |
 
 That dialog has no OK: every field is saved the moment you change it, and
@@ -96,8 +99,8 @@ would be lost: Radio.co accepts a title only once it has switched to the live
 source, and answers `200` to one sent before that without applying it. Every
 press of **Update** sends again, even an unchanged title.
 
-The **title line** under the field shows what happened to the last title on
-each destination — `radio.co ✓ 21:04 · Kick ✓ 21:04` — with the server's
+The **title line** next to the status shows what happened to the last title on
+each destination — `radio.co ✓ · Kick ✓`, the times in its tooltip — with the server's
 reason in its tooltip and in the OBS log. A title that gets no answer
 (network down, server error) is retried after 5, 10 and 20 seconds, then shown
 in red as `✗ not set`; one the server refuses outright is shown at once. A
@@ -213,6 +216,27 @@ put in the Settings → Stream slot — that slot holds exactly one service, and
 it is not an audio-only one.
 
 ---
+
+## Setting the Stream name from another plugin
+
+Other OBS plugins can set the Stream name through a global procedure (since
+1.5.0). It does what typing the name and pressing **Update** does: the name is
+saved, sent to Radio.co when connected (and 15 s after the next connect
+otherwise), and to Kick when **Also set the Kick title** is on. An unchanged
+name is ignored.
+
+```c
+calldata_t cd;
+calldata_init(&cd);
+calldata_set_string(&cd, "name", "Show name");
+calldata_set_string(&cd, "from", "my-plugin"); /* only for the log */
+proc_handler_call(obs_get_proc_handler(), "radioco_set_stream_name", &cd);
+bool ok = calldata_bool(&cd, "ok"); /* false: the dock does not exist */
+calldata_free(&cd);
+```
+
+`proc_handler_call` returns false when obs-icecast is older than 1.5.0 or not
+loaded. The log shows `[obs-icecast] stream name set by my-plugin: …`.
 
 ## Hotkeys
 
@@ -335,7 +359,7 @@ codesign --force --sign - --identifier io.github.nurettinselim.obs-icecast \
          --timestamp=none build/obs-icecast.plugin
 
 ditto -c -k --keepParent build/obs-icecast.plugin \
-      obs-icecast-1.4.0-arm64.zip
+      obs-icecast-1.5.0-arm64.zip
 ```
 
 `simde` is needed because `libobs`'s SSE-intrinsics header pulls in
